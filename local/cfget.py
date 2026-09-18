@@ -20,6 +20,11 @@ cfget —— 通过 Cloudflare Worker 中转下载文件到本地
   python cfget.py "https://example.com/a.zip" --no-relay
 
 中转地址也可用环境变量 CF_RELAY / CF_RELAY_TOKEN 预设。
+
+中转链接默认形态是路径拼接 —— 域名后面直接接原始直链：
+  https://cf-relay.xxx.workers.dev/https://example.com/a.zip
+仅当原始链接自带的 query 命中 Worker 保留字（url/u/q/token/name/mode）时，
+才自动回退成 ?url= 形态，避免这些参数被 Worker 当成自己的参数吃掉。
 """
 
 import argparse
@@ -40,23 +45,50 @@ MAX_PARTS = 256
 TIMEOUT = 30
 RETRY = 3
 
+# Worker 自己占用的 query 参数名：路径拼接形态下会被剥掉，透传不到源站
+RESERVED = ("url", "u", "q", "token", "name", "mode")
+
 
 # ------------------------------------------------------------------ 基础工具
 
 def build_relay_url(relay, url, name=None, token=None, mode=None):
-    """把原始链接包装成 Worker 中转链接"""
+    """把原始链接包装成 Worker 中转链接。
+
+    默认形态是路径拼接（域名后面直接接原始直链）：
+        https://w.workers.dev/https://get.com/get.zip
+    仅当原始链接自带的 query 命中 Worker 保留字时，才回退成 ?url= 形态，
+    否则那些参数会被 Worker 当成自己的参数吃掉，导致下载失败。
+    """
     if not relay:
         return url
     base = relay.rstrip("/")
-    qs = {"url": url}
-    if token:
-        qs["token"] = token
-    if mode:
-        qs["mode"] = mode
-    query = urllib.parse.urlencode(qs)
+
+    extra = {}
     if name:
-        return f"{base}/dl/{urllib.parse.quote(name, safe='')}?{query}"
-    return f"{base}/?{query}"
+        extra["name"] = name
+    if token:
+        extra["token"] = token
+    if mode:
+        extra["mode"] = mode
+
+    if has_reserved_query(url):
+        qs = {"url": url}
+        qs.update(extra)
+        return f"{base}/?{urllib.parse.urlencode(qs)}"
+
+    tail = urllib.parse.urlencode(extra) if extra else ""
+    return f"{base}/{url}" + (f"?{tail}" if tail else "")
+
+
+def has_reserved_query(url):
+    """原始链接自带的 query 里是否命中 Worker 保留字"""
+    query = urllib.parse.urlparse(url).query
+    if not query:
+        return False
+    for kv in query.split("&"):
+        if kv and kv.split("=")[0].lower() in RESERVED:
+            return True
+    return False
 
 
 def sanitize(name):

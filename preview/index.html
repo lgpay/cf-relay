@@ -48,9 +48,12 @@
   .ghost:hover{border-color:var(--sub)}
   kbd{font:11px/1 ui-monospace,Consolas,monospace;color:var(--sub);border:1px solid var(--line);
     border-radius:5px;padding:3px 5px;margin-left:2px}
-  .foot{margin-top:34px;text-align:center;color:var(--sub);font-size:12px;line-height:2.1}
-  .foot code{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;background:var(--card);
+  code{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;background:var(--card);
     border:1px solid var(--line);border-radius:5px;padding:2px 6px;color:var(--fg);word-break:break-all}
+  .out{margin:14px 2px 0;text-align:center;color:var(--sub);font-size:12px;line-height:2;word-break:break-all}
+  .out.done{color:var(--sub)}
+  .out.done code{color:var(--fg)}
+  .foot{margin-top:30px;text-align:center;color:var(--sub);font-size:12px;line-height:2.1}
   .foot a{color:inherit;text-underline-offset:2px;text-decoration-color:var(--line)}
   .foot a:hover{color:var(--fg);text-decoration-color:currentColor}
   .adv{margin-top:26px}
@@ -73,7 +76,7 @@
 <body>
 <main>
   <h1>CF Relay</h1>
-  <p class="sub">把下载直链交给 Cloudflare 边缘节点中转，换一条更稳定的链接。支持 Range 断点续传，可直接打开或复制分享。</p>
+  <p class="sub">把下载直链拼在本站域名后面，交给 Cloudflare 边缘节点中转，换一条更稳定的链接。支持 Range 断点续传，可直接打开或复制分享。</p>
 
   <div class="bar" id="bar">
     <span class="ico">
@@ -82,10 +85,12 @@
         <path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M4 21h16"></path>
       </svg>
     </span>
-    <input id="src" placeholder="粘贴下载直链，自动生成中转链接…" autocomplete="off" spellcheck="false" autofocus>
+    <input id="src" placeholder="粘贴下载直链，框内保持原样…" autocomplete="off" spellcheck="false" autofocus>
     <button class="solid" id="open">打开 ↗</button>
     <button class="ghost" id="copy">复制 <kbd id="kc">Ctrl C</kbd></button>
   </div>
+
+  <p class="out" id="out"><span id="glabel">示例：</span><code id="eg"></code></p>
 
   <details class="adv">
     <summary>高级选项</summary>
@@ -94,11 +99,10 @@
   </details>
 
   <p class="foot">
-    也可以在地址栏直接拼接：<code id="eg"></code><br>
     <span id="api" hidden>程序化调用：<a id="apilink" href="/api">JSON API</a>
-      <code>/api/link</code> <code>/api/info</code> <code>/api/check</code></span>
-    <span id="note" hidden>当前是本地预览，域名是占位符；部署到 Cloudflare 后会自动换成你自己的 Worker 域名</span>
-    <span id="ready" hidden>输入即生成中转链接 · 支持 Range 断点续传 · 大文件建议用 cfget.py 多线程下载</span>
+      <code>/api/link</code> <code>/api/info</code> <code>/api/check</code><br></span>
+    <span id="note" hidden>当前是本地预览，域名是占位符；部署到 Cloudflare 后会自动换成你自己的 Worker 域名<br></span>
+    <span id="ready" hidden>框内始终保留原始直链 · 中转链接实时生成在上方 · 打开与复制都用中转链接</span>
   </p>
 </main>
 <div class="toast" id="toast">已复制</div>
@@ -107,17 +111,21 @@
 (function(){
   var IS_FILE = location.protocol === 'file:';
   var RELAY = (IS_FILE ? 'https://cf-relay.demo.workers.dev' : location.origin).replace(/\/+$/, '');
+  // Worker 自己占用的参数名：路径拼接形态下它们会被剥掉，不能透传给源站
+  var RESERVED = ['url', 'u', 'q', 'token', 'name', 'mode'];
+  var EXAMPLE = RELAY + '/https://example.com/file.zip';
 
   var $ = function(id){ return document.getElementById(id); };
   var src = $('src'), nameI = $('name'), tokenI = $('token');
-  var bar = $('bar'), toastEl = $('toast'), tmr = null, rawCache = '';
+  var bar = $('bar'), outEl = $('out'), toastEl = $('toast');
+  var tmr = null, debounce = null, outCache = '';
 
   $('kc').textContent = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent) ? '\u2318C' : 'Ctrl C';
-  $('eg').textContent = RELAY + '/https://example.com/file.zip';
   $('note').hidden = !IS_FILE;
   $('ready').hidden = IS_FILE;
   $('api').hidden = IS_FILE;
   $('apilink').setAttribute('href', RELAY + '/api');
+  showExample();
 
   function toast(msg){
     toastEl.textContent = msg;
@@ -126,69 +134,136 @@
     tmr = setTimeout(function(){ toastEl.classList.remove('on'); }, 1400);
   }
 
-  // 已经是我们自己的代理链接就不再二次包装
-  function isRelayed(s){
-    return s.indexOf(RELAY + '/') === 0 && s.indexOf('url=') > -1;
+  function flash(){
+    bar.classList.remove('flash');
+    void bar.offsetWidth;
+    bar.classList.add('flash');
+  }
+
+  // 路径拼接形态必须先有协议头，否则 Worker 认不出来
+  function normalize(v){
+    v = v.trim();
+    if (/^https?:\/\//i.test(v)) return v;
+    if (/^https?:\/*/i.test(v)){
+      return v.replace(/^https?:\/*/i, function(m){ return m.replace(/\/*$/, '://'); });
+    }
+    return 'https://' + v.replace(/^\/+/, '');
+  }
+
+  // 贴进来的是中转链接（新形态 / 旧的 ?url= 形态）→ 还原成原始直链，框内永远显示原始地址
+  function unwrap(s){
+    var v = s.trim();
+    if (v.indexOf(RELAY + '/') === 0){
+      var rest = v.slice(RELAY.length + 1);
+      var qi = rest.indexOf('?');
+      var path = qi === -1 ? rest : rest.slice(0, qi);
+      // 注意：旧的 ?url= 形态同样以「本站域名/」开头，但此时 path 为空，
+      // 必须放过去交给下面的旧形态分支处理，不能在这里直接返回
+      if (/^https?:\/\//i.test(path)){
+        var keep = [];
+        (qi === -1 ? '' : rest.slice(qi + 1)).split('&').forEach(function(kv){
+          if (!kv) return;
+          if (RESERVED.indexOf(kv.split('=')[0].toLowerCase()) === -1) keep.push(kv);
+        });
+        return path + (keep.length ? '?' + keep.join('&') : '');
+      }
+    }
+    try {
+      var u = new URL(v);
+      if (u.origin === RELAY){
+        var t = u.searchParams.get('url') || u.searchParams.get('u') || u.searchParams.get('q');
+        if (t) return t;
+      }
+    } catch (e) {}
+    return v;
+  }
+
+  // 目标链接自带的 query 里命中保留字时，路径拼接形态会把这些参数吃掉 → 回退 ?url= 形态
+  function needsQueryForm(raw){
+    var qi = raw.indexOf('?');
+    if (qi === -1) return false;
+    var q = raw.slice(qi + 1).split('#')[0];
+    var hit = false;
+    q.split('&').forEach(function(kv){
+      if (kv && RESERVED.indexOf(kv.split('=')[0].toLowerCase()) > -1) hit = true;
+    });
+    return hit;
   }
 
   function build(raw){
+    var extra = [];
     var n = nameI.value.trim(), t = tokenI.value.trim();
-    var u = RELAY + (n ? '/dl/' + encodeURIComponent(n) : '/') + '?url=' + encodeURIComponent(raw);
-    if (t) u += '&token=' + encodeURIComponent(t);
-    return u;
-  }
+    if (n) extra.push('name=' + encodeURIComponent(n));
+    if (t) extra.push('token=' + encodeURIComponent(t));
+    var tail = extra.length ? (needsQueryForm(raw) ? '&' : '?') + extra.join('&') : '';
 
-  // 就地转换：输入原始链接 -> 框内直接变成代理链接
-  function convert(animate){
-    var v = src.value.trim();
-    if (!v){ rawCache = ''; src.removeAttribute('title'); return ''; }
-    if (isRelayed(v)) return v;
-
-    rawCache = v;
-    var out = build(v);
-    src.value = out;
-    src.setAttribute('title', '\u539f\u59cb\u94fe\u63a5\uff1a' + v);
-    try { src.setSelectionRange(out.length, out.length); } catch (e) {}
-    if (animate){
-      bar.classList.remove('flash');
-      void bar.offsetWidth;
-      bar.classList.add('flash');
+    if (needsQueryForm(raw)){
+      return { url: RELAY + '/?url=' + encodeURIComponent(raw) + tail, form: 'query' };
     }
-    return out;
+    return { url: RELAY + '/' + raw + tail, form: 'path' };
   }
 
-  function finalUrl(){
+  function showExample(){
+    outEl.classList.remove('done');
+    $('glabel').textContent = '示例：';
+    $('eg').textContent = EXAMPLE;
+  }
+
+  function setOut(r){
+    outEl.classList.add('done');
+    $('glabel').textContent = r.form === 'query'
+      ? '\u4e2d\u8f6c\u94fe\u63a5\uff08\u76ee\u6807\u5e26\u4fdd\u7559\u53c2\u6570\uff0c\u5df2\u56de\u9000 ?url= \u5f62\u6001\uff09\uff1a'
+      : '\u4e2d\u8f6c\u94fe\u63a5\uff1a';
+    $('eg').textContent = r.url;
+  }
+
+  // 唯一入口：读框内的原始直链 → 生成中转链接（框内内容不变）
+  function refresh(animate){
     var v = src.value.trim();
-    if (!v) return '';
-    return isRelayed(v) ? v : convert(false);
+    if (!v){
+      outCache = '';
+      src.removeAttribute('title');
+      showExample();
+      return '';
+    }
+
+    var raw = unwrap(v);
+    if (raw !== v) src.value = raw;          // 贴进来的是中转链接 → 还原为原始直链
+    raw = normalize(raw);
+    if (raw !== src.value) src.value = raw;  // 补协议头，同样保持"显示原始地址"
+
+    var r = build(raw);
+    outCache = r.url;
+    src.setAttribute('title', '\u4e2d\u8f6c\u94fe\u63a5\uff1a' + r.url);
+    setOut(r);
+    if (animate) flash();
+    return r.url;
   }
 
-  var debounce = null;
   src.addEventListener('input', function(){
     clearTimeout(debounce);
-    debounce = setTimeout(function(){ convert(true); }, 220);
+    debounce = setTimeout(function(){ refresh(true); }, 220);
   });
   src.addEventListener('paste', function(){
     clearTimeout(debounce);
-    setTimeout(function(){ convert(true); }, 0);
+    setTimeout(function(){ refresh(true); }, 0);
   });
   src.addEventListener('keydown', function(e){
-    if (e.key === 'Enter'){ e.preventDefault(); clearTimeout(debounce); convert(true); }
+    if (e.key === 'Enter'){ e.preventDefault(); clearTimeout(debounce); refresh(true); }
   });
   src.addEventListener('blur', function(){
     clearTimeout(debounce);
-    convert(false);
+    refresh(false);
   });
 
-  // 参数变化 -> 用缓存的原始链接重新生成，避免在代理链接上套娃
-  function rebuild(){
-    if (!rawCache) return;
-    var out = build(rawCache);
-    src.value = out;
-    src.setAttribute('title', '\u539f\u59cb\u94fe\u63a5\uff1a' + rawCache);
+  // 高级选项变化 → 直接用框内的原始直链重算
+  nameI.addEventListener('input', function(){ refresh(false); });
+  tokenI.addEventListener('input', function(){ refresh(false); });
+
+  function finalUrl(){
+    if (!src.value.trim()) return '';
+    return outCache || refresh(false);
   }
-  nameI.addEventListener('input', rebuild);
-  tokenI.addEventListener('input', rebuild);
 
   function copyText(text){
     if (navigator.clipboard && navigator.clipboard.writeText){
@@ -196,9 +271,15 @@
     }
     return new Promise(function(resolve, reject){
       try {
-        src.select();
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
         var ok = document.execCommand('copy');
-        src.setSelectionRange(text.length, text.length);
+        document.body.removeChild(ta);
         ok ? resolve() : reject(new Error('execCommand failed'));
       } catch (e) { reject(e); }
     });

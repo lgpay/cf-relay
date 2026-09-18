@@ -96,20 +96,37 @@ Dashboard → Settings → Variables and Secrets 存为 **Secret**，或本地�
 
 ## 二、中转后的链接长什么样
 
+**默认形态是路径拼接 —— 域名后面直接接原始直链**，页面上「打开 / 复制」产出的就是这种：
+
+```
+原始直链   https://get.com/get.zip
+中转链接   https://<your-worker>.workers.dev/https://get.com/get.zip
+```
+
 | 形态 | 示例 | 说明 |
 |---|---|---|
-| 查询参数 | `https://w.workers.dev/?url=https%3A%2F%2Fa.com%2Ff.zip` | 最通用 |
-| 带文件名 | `https://w.workers.dev/dl/my%20file.zip?url=<encoded>` | 强制下载并指定保存名 |
-| 路径拼接 | `https://w.workers.dev/https://a.com/f.zip` | 手敲最快 |
-| 信息探测 | `https://w.workers.dev/?url=<encoded>&mode=info` | 返回 JSON：大小 / 文件名 / 是否支持 Range |
+| **路径拼接（默认）** | `https://w.workers.dev/https://a.com/f.zip` | 最直观，手敲最快 |
+| 指定文件名 | `https://w.workers.dev/https://a.com/f.zip?name=a.zip` | 覆盖源站推断出的保存名 |
+| 查询参数 | `https://w.workers.dev/?url=https%3A%2F%2Fa.com%2Ff.zip` | 参数全在 `url` 里编码，绝不与源站冲突 |
+| 回退形态 | 同上 | 原始链接自带 `?token=`/`?name=` 这类保留参数时自动改用这种 |
+| 信息探测 | `https://w.workers.dev/https://a.com/f.zip?mode=info` | 返回 JSON：大小 / 文件名 / 是否支持 Range |
 
-带令牌时追加 `&token=xxx`，或请求头 `Authorization: Bearer xxx`（API 还支持 `X-API-Key`）。
+带令牌时追加 `?token=xxx` 或 `&token=xxx`，或请求头 `Authorization: Bearer xxx`（API 还支持 `X-API-Key`）。
+
+> ⚠️ **为什么有「回退形态」**：路径拼接时域名后面的部分也是 query，Worker 无法区分
+> 「这是源站自己的 `?token=abc`」还是「这是给我的访问令牌」——保留字
+> `url` / `u` / `q` / `token` / `name` / `mode` 会被 Worker 吃掉。所以当原始链接自带的 query
+> 命中这些名字时，页面和 `cfget.py` 都会**自动改回 `?url=` 形态**（整条原始链接被编码进
+> `url` 参数，不会有任何冲突），并在页面上标注说明。
+> 另外：源站的 `?token=` 只在 Worker 真的配了 `TOKEN` 时才会被当成访问令牌剥掉，没配就原样透传。
 
 程序化调用（脚本 / 其他服务）见 [三、JSON API](#三json-api)。
 
-直接访问 `https://w.workers.dev/` 得到操作页面：**单框输入原始链接，框内就地变成代理链接**，右侧「打开 ↗」新窗口直接下载、「复制」拿走链接。
-转换是自动的（输入/粘贴后 220ms，回车立即），已经是本 Worker 的链接不会再被套娃包装；框内悬停可看到原始链接。
-底部「参数设置」可填保存文件名与访问令牌，改动后立即按原始链接重算。`Ctrl+Enter` 直接打开。
+直接访问 `https://w.workers.dev/` 得到操作页面：**输入框里始终是你粘进去的原始直链，中转型链接在下方实时生成**，
+右侧「打开 ↗」新窗口直接下载、「复制」拿走链接——两个按钮用的都是中转链接。
+转换是自动的（输入/粘贴后 220ms，回车立即）；粘贴进来的如果已经是中转链接，会自动还原成原始地址。
+粘贴的地址若没带 `http(s)://` 会自动补上（路径拼接形态必须有协议头，否则 Worker 认不出目标）。
+底部「高级选项」可填保存文件名与访问令牌，改动后立即重算。`Ctrl+Enter` 直接打开。
 
 ## 三、JSON API
 
@@ -148,17 +165,22 @@ curl -s "$W/api/check?url=<encoded>"              # 只做域名策略预检，�
   "allowed": 1,
   "items": [
     {
-      "source": "https://example.com/a.zip",
+      "source": "https://get.com/get.zip",
       "ok": true,
       "allowed": true,
       "reason": null,
-      "filename": "a.zip",
-      "relay_url": "https://w.workers.dev/dl/a.zip?url=https%3A%2F%2Fexample.com%2Fa.zip",
-      "relay_url_short": "https://w.workers.dev/https://example.com/a.zip"
+      "filename": "get.zip",
+      "link_form": "path",
+      "relay_url": "https://w.workers.dev/https://get.com/get.zip",
+      "relay_url_query": "https://w.workers.dev/?url=https%3A%2F%2Fget.com%2Fget.zip"
     }
   ]
 }
 ```
+
+`relay_url` 是**推荐直接用**的那条（默认路径拼接）；`relay_url_query` 是等价的 `?url=` 形态，
+在源站保留参数、或对方系统对域名后带斜杠的路径有洁癖时用。`link_form` 取值 `path` / `query`，
+告诉你 `relay_url` 用的是哪种。
 
 批量 + 探测：
 
@@ -234,8 +256,9 @@ cd worker && npm run deploy
 set CF_RELAY=https://cf-relay.xxx.workers.dev      # PowerShell: $env:CF_RELAY="..."
 set CF_RELAY_TOKEN=your-token                      # 可选
 
-# 只生成中转链接（不下载）
+# 只生成中转链接（不下载），默认输出路径拼接形态
 python cfget.py "https://example.com/a.zip" --print
+#   -> https://cf-relay.xxx.workers.dev/https://example.com/a.zip
 
 # 下载到当前目录，4 线程 + 断点续传
 python cfget.py "https://example.com/a.zip"
@@ -264,3 +287,8 @@ python cfget.py "https://example.com/a.zip" -H "Referer: https://example.com" --
 - Worker 转发时会强制 `Accept-Encoding: identity`，保证 `Content-Length` 与 Range 语义一致（代价：源站的 gzip 压缩失效，流量略增）。
 - 源站若 302 到另一个域，Worker 默认自动跟随；白名单按**原始 URL** 的 host 判定。
 - 源站有 IP 频控时，中转后出口 IP 是 CF 的，可能更容易被限流——这时靠 `UA` / `REFERER` / `UPSTREAM_HEADERS` 补。
+- **路径拼接形态下，源站 query 里的 `url` / `u` / `q` / `token` / `name` / `mode` 会被 Worker 吃掉**
+  （`token` 仅当 Worker 配了 `TOKEN` 时；其余始终）。页面与 `cfget.py` 遇到这种原始链接会自动
+  改用 `?url=` 形态；自己拼链接时遇到同样情况请手动换成 `?url=` 形态。
+- 路径拼接形态的域名后面**必须带协议头**（`https://` 或 `http://`），否则 Worker 认不出目标而返回
+  `400`。只写 `w.workers.dev/get.com/f.zip` 是无效的；页面已自动补全。

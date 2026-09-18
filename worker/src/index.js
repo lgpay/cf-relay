@@ -2,9 +2,12 @@
  * CF Relay —— 通用 HTTP(S) 下载中转（Cloudflare Worker）
  *
  * 【一、链接形态】把原始直链包装成中转链接：
- *   1) 查询参数：  https://<worker>/?url=https%3A%2F%2Fexample.com%2Fa.zip
- *   2) 带文件名：  https://<worker>/dl/my%20file.zip?url=<encoded>
- *   3) 路径拼接：  https://<worker>/https://example.com/a.zip
+ *   1) 路径拼接（推荐）：https://<worker>/https://example.com/a.zip
+ *        —— 域名后面直接接原始直链，页面上「打开 / 复制」默认产出的就是这种
+ *   2) 查询参数：  https://<worker>/?url=https%3A%2F%2Fexample.com%2Fa.zip
+ *        —— 原始链接自带 query 且命中保留字（url/u/q/token/name/mode）时自动回退到这种
+ *   3) 指定文件名：https://<worker>/dl/my%20file.zip?url=<encoded>
+ *        —— 也可以给上面两种形态追加 ?name=<文件名>
  *   &mode=info   → 只探测，返回 JSON（HEAD 上游）
  *   GET /        → 操作页面，粘贴直链生成中转链接
  *
@@ -38,6 +41,9 @@ const RELAY_VERSION = '1.1.0';
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) CF-Relay/1.0';
 const API_MAX_BATCH = 50;              // 单次批量最多处理多少个 url
 const API_MAX_BODY = 64 * 1024;        // POST 请求体上限
+
+/** Worker 自己占用的 query 参数名：路径拼接形态下会从透传里剥掉 */
+const RESERVED_KEYS = new Set(['url', 'u', 'q', 'token', 'name', 'mode']);
 
 /** 业务异常：统一转成 JSON 错误响应 */
 class ApiError extends Error {
@@ -86,7 +92,7 @@ export default {
 
     let target;
     try {
-      target = resolveTarget(url);
+      target = resolveTarget(url, env);
     } catch (e) {
       return jsonError(400, e.message || 'bad target url');
     }
@@ -150,18 +156,19 @@ function httpCode(status) {
 }
 
 /** 从请求里还原出原始下载链接 */
-function resolveTarget(url) {
+function resolveTarget(url, env) {
   const raw = url.searchParams.get('url') || url.searchParams.get('u') || url.searchParams.get('q');
   if (raw) return normalizeUrl(raw);
 
+  // 路径拼接形态：https://<worker>/https://host/path —— 域名后面直接接原始直链
   const m = url.pathname.match(/^\/https?:\/*(.+)$/i);
   if (m) {
     const scheme = url.pathname.toLowerCase().startsWith('/https:') ? 'https' : 'http';
-    let rest = m[1];
-    const extra = buildUpstreamQuery(url);
+    const rest = m[1];
+    const extra = buildUpstreamQuery(url, env);
     return `${scheme}://${rest}${extra}`;
   }
-  throw new Error('no target: use ?url=<encoded> or /https://host/path');
+  throw new Error('no target: use /https://host/path or ?url=<encoded>');
 }
 
 function normalizeUrl(raw) {
@@ -174,9 +181,16 @@ function normalizeUrl(raw) {
   return u.toString();
 }
 
-/** 路径拼接形态时，把 token/url/name 之外的 query 透传给源站 */
-function buildUpstreamQuery(url) {
-  const skip = new Set(['url', 'u', 'q', 'token', 'name', 'mode']);
+/**
+ * 路径拼接形态时，把 Worker 自己占用的参数之外的部分透传给源站。
+ *
+ * 注意：路径拼接形态下无法区分"我们的 token"与"源站自己的 token"，所以
+ * 只在 Worker 真的配了 TOKEN 时才剥掉它 —— 否则源站自己的 ?token= 会被误吞。
+ * name 始终是我们用于覆盖文件名的参数；源站若也需要同名参数，请改用 ?url= 形态。
+ */
+function buildUpstreamQuery(url, env) {
+  const skip = new Set(['url', 'u', 'q', 'name', 'mode']);
+  if (env && env.TOKEN) skip.add('token');
   const sp = new URLSearchParams();
   for (const [k, v] of url.searchParams) if (!skip.has(k)) sp.append(k, v);
   const s = sp.toString();
@@ -533,7 +547,7 @@ async function apiCheck(request, env, reqUrl) {
 function buildLinkItem(it, p, env, reqUrl) {
   const item = {
     source: it.url, ok: false, allowed: false, reason: null,
-    filename: '', relay_url: '', relay_url_short: '',
+    filename: '', relay_url: '', relay_url_query: '', link_form: '',
   };
 
   let target;
@@ -552,18 +566,44 @@ function buildLinkItem(it, p, env, reqUrl) {
 
   const override = it.name || p.name || '';
   item.filename = override ? safeName(override) : guessName(target, null, null);
-  item.relay_url = buildRelayUrl(reqUrl.origin, target, item.filename, p);
-  item.relay_url_short = target.includes('#') ? '' : `${reqUrl.origin}/${target}`;
+
+  // 附加参数：文件名覆盖、可选内嵌令牌
+  const extra = [];
+  if (override) extra.push(['name', item.filename]);
+  if (p && p.embed_token && p.token) extra.push(['token', p.token]);
+
+  // 默认走路径拼接形态（域名后面直接接原始直链）；源站自带保留参数时回退到 ?url= 形态
+  const reserved = targetQueryHasReservedKey(target);
+  item.link_form = reserved ? 'query' : 'path';
+  item.relay_url = reserved
+    ? queryForm(reqUrl.origin, target, extra)
+    : pathForm(reqUrl.origin, target, extra);
+  item.relay_url_query = queryForm(reqUrl.origin, target, extra);
   return item;
 }
 
-function buildRelayUrl(origin, target, name, p) {
-  const qs = new URLSearchParams();
-  qs.set('url', target);
-  // 默认不把令牌写进链接（会随日志/分享外泄），需要时显式 embed_token=1
-  if (p && p.embed_token && p.token) qs.set('token', p.token);
-  const base = name ? `${origin}/dl/${encodeURIComponent(name)}` : `${origin}/`;
-  return `${base}?${qs.toString()}`;
+/** 目标链接自带的 query 命中 Worker 保留字，路径拼接形态会把它吃掉 */
+function targetQueryHasReservedKey(target) {
+  const qi = target.indexOf('?');
+  if (qi === -1) return false;
+  const q = target.slice(qi + 1).split('#')[0];
+  return q.split('&').some((kv) => kv && RESERVED_KEYS.has(kv.split('=')[0].toLowerCase()));
+}
+
+/** 路径拼接形态：域名后面直接接原始直链 */
+function pathForm(origin, target, extra) {
+  return `${origin}/${target}${appendQuery(extra, true)}`;
+}
+
+/** ?url= 形态：参数全在 url 里编码，绝不与源站参数冲突 */
+function queryForm(origin, target, extra) {
+  return `${origin}/?url=${encodeURIComponent(target)}${appendQuery(extra, false)}`;
+}
+
+function appendQuery(extra, startsQuery) {
+  if (!extra.length) return '';
+  const s = extra.map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+  return `${startsQuery ? '?' : '&'}${s}`;
 }
 
 /** 读取 GET query 与 POST JSON 体，统一成 { urls:[{url,name}], name, token, info, embed_token } */
@@ -691,7 +731,8 @@ function apiIndex(reqUrl, env) {
       },
       {
         method: 'GET / POST', path: '/api/link', auth: true,
-        desc: '生成中转链接。GET 用重复的 url 参数批量，POST 用 {"urls":[...]}；加 info=true 会顺带探测。',
+        desc: '生成中转链接，默认路径拼接形态（域名后面直接接原始直链）。GET 用重复的 url 参数批量，'
+          + 'POST 用 {"urls":[...]}；加 info=true 会顺带探测。',
         example: `${o}/api/link?url=${E('https://example.com/a.zip')}`,
         example_post: `curl -X POST ${o}/api/link -H 'content-type: application/json' `
           + `-d '{"urls":["https://example.com/a.zip"],"info":true}'`,
@@ -708,14 +749,19 @@ function apiIndex(reqUrl, env) {
       },
     ],
     link_forms: {
-      query: `${o}/?url=${E('https://example.com/a.zip')}`,
-      with_name: `${o}/dl/${encodeURIComponent('a.zip')}?url=${E('https://example.com/a.zip')}`,
       path_join: `${o}/https://example.com/a.zip`,
-      probe: `${o}/?url=${E('https://example.com/a.zip')}&mode=info`,
+      with_name: `${o}/https://example.com/a.zip?name=a.zip`,
+      query: `${o}/?url=${E('https://example.com/a.zip')}`,
+      probe: `${o}/https://example.com/a.zip?mode=info`,
     },
     notes: [
-      '中转链接与 API 共用同一套域名白/黑名单与 SSRF 防护，被拦时下载会得到 403 JSON。',
-      'relay_url 默认不含令牌；需要「拿去就能打开」的链接时传 embed_token=1，令牌会被写进链接。',
+      '推荐路径拼接形态：域名后面直接接原始直链，如 ' + `${o}/https://example.com/a.zip` + '；'
+        + '仅当原始链接自带的 query 命中保留字（url/u/q/token/name/mode）时，才会带上 ?url= 形式。',
+      '路径拼接形态下，源站自己的 ?token= 只在 Worker 配置了 TOKEN 时才会被当作访问令牌而剥掉；'
+        + '若源站依赖这几个保留参数名，请用 relay_url_query。',
+      '被域名黑白名单拦下时，relay_url 仍会返回，只在 allowed / reason 里标注；'
+        + '真正下载才会得到 403 JSON。',
+      'relay_url 默认不含令牌；需要「拿去就能打开」的链接时传 embed_token=1。',
       'Worker 转发时强制 Accept-Encoding: identity，因此 content_length 与实际字节数一致。',
     ],
   };
@@ -794,9 +840,12 @@ function homePage() {
   .ghost:hover{border-color:var(--sub)}
   kbd{font:11px/1 ui-monospace,Consolas,monospace;color:var(--sub);border:1px solid var(--line);
     border-radius:5px;padding:3px 5px;margin-left:2px}
-  .foot{margin-top:34px;text-align:center;color:var(--sub);font-size:12px;line-height:2.1}
-  .foot code{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;background:var(--card);
+  code{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;background:var(--card);
     border:1px solid var(--line);border-radius:5px;padding:2px 6px;color:var(--fg);word-break:break-all}
+  .out{margin:14px 2px 0;text-align:center;color:var(--sub);font-size:12px;line-height:2;word-break:break-all}
+  .out.done{color:var(--sub)}
+  .out.done code{color:var(--fg)}
+  .foot{margin-top:30px;text-align:center;color:var(--sub);font-size:12px;line-height:2.1}
   .foot a{color:inherit;text-underline-offset:2px;text-decoration-color:var(--line)}
   .foot a:hover{color:var(--fg);text-decoration-color:currentColor}
   .adv{margin-top:26px}
@@ -819,7 +868,7 @@ function homePage() {
 <body>
 <main>
   <h1>CF Relay</h1>
-  <p class="sub">把下载直链交给 Cloudflare 边缘节点中转，换一条更稳定的链接。支持 Range 断点续传，可直接打开或复制分享。</p>
+  <p class="sub">把下载直链拼在本站域名后面，交给 Cloudflare 边缘节点中转，换一条更稳定的链接。支持 Range 断点续传，可直接打开或复制分享。</p>
 
   <div class="bar" id="bar">
     <span class="ico">
@@ -828,10 +877,12 @@ function homePage() {
         <path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M4 21h16"></path>
       </svg>
     </span>
-    <input id="src" placeholder="粘贴下载直链，自动生成中转链接…" autocomplete="off" spellcheck="false" autofocus>
+    <input id="src" placeholder="粘贴下载直链，框内保持原样…" autocomplete="off" spellcheck="false" autofocus>
     <button class="solid" id="open">打开 ↗</button>
     <button class="ghost" id="copy">复制 <kbd id="kc">Ctrl C</kbd></button>
   </div>
+
+  <p class="out" id="out"><span id="glabel">示例：</span><code id="eg"></code></p>
 
   <details class="adv">
     <summary>高级选项</summary>
@@ -840,11 +891,10 @@ function homePage() {
   </details>
 
   <p class="foot">
-    也可以在地址栏直接拼接：<code id="eg"></code><br>
     <span id="api" hidden>程序化调用：<a id="apilink" href="/api">JSON API</a>
-      <code>/api/link</code> <code>/api/info</code> <code>/api/check</code></span>
-    <span id="note" hidden>当前是本地预览，域名是占位符；部署到 Cloudflare 后会自动换成你自己的 Worker 域名</span>
-    <span id="ready" hidden>输入即生成中转链接 · 支持 Range 断点续传 · 大文件建议用 cfget.py 多线程下载</span>
+      <code>/api/link</code> <code>/api/info</code> <code>/api/check</code><br></span>
+    <span id="note" hidden>当前是本地预览，域名是占位符；部署到 Cloudflare 后会自动换成你自己的 Worker 域名<br></span>
+    <span id="ready" hidden>框内始终保留原始直链 · 中转链接实时生成在上方 · 打开与复制都用中转链接</span>
   </p>
 </main>
 <div class="toast" id="toast">已复制</div>
@@ -853,17 +903,21 @@ function homePage() {
 (function(){
   var IS_FILE = location.protocol === 'file:';
   var RELAY = (IS_FILE ? 'https://cf-relay.demo.workers.dev' : location.origin).replace(/\/+$/, '');
+  // Worker 自己占用的参数名：路径拼接形态下它们会被剥掉，不能透传给源站
+  var RESERVED = ['url', 'u', 'q', 'token', 'name', 'mode'];
+  var EXAMPLE = RELAY + '/https://example.com/file.zip';
 
   var $ = function(id){ return document.getElementById(id); };
   var src = $('src'), nameI = $('name'), tokenI = $('token');
-  var bar = $('bar'), toastEl = $('toast'), tmr = null, rawCache = '';
+  var bar = $('bar'), outEl = $('out'), toastEl = $('toast');
+  var tmr = null, debounce = null, outCache = '';
 
   $('kc').textContent = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent) ? '\u2318C' : 'Ctrl C';
-  $('eg').textContent = RELAY + '/https://example.com/file.zip';
   $('note').hidden = !IS_FILE;
   $('ready').hidden = IS_FILE;
   $('api').hidden = IS_FILE;
   $('apilink').setAttribute('href', RELAY + '/api');
+  showExample();
 
   function toast(msg){
     toastEl.textContent = msg;
@@ -872,69 +926,136 @@ function homePage() {
     tmr = setTimeout(function(){ toastEl.classList.remove('on'); }, 1400);
   }
 
-  // 已经是我们自己的代理链接就不再二次包装
-  function isRelayed(s){
-    return s.indexOf(RELAY + '/') === 0 && s.indexOf('url=') > -1;
+  function flash(){
+    bar.classList.remove('flash');
+    void bar.offsetWidth;
+    bar.classList.add('flash');
+  }
+
+  // 路径拼接形态必须先有协议头，否则 Worker 认不出来
+  function normalize(v){
+    v = v.trim();
+    if (/^https?:\/\//i.test(v)) return v;
+    if (/^https?:\/*/i.test(v)){
+      return v.replace(/^https?:\/*/i, function(m){ return m.replace(/\/*$/, '://'); });
+    }
+    return 'https://' + v.replace(/^\/+/, '');
+  }
+
+  // 贴进来的是中转链接（新形态 / 旧的 ?url= 形态）→ 还原成原始直链，框内永远显示原始地址
+  function unwrap(s){
+    var v = s.trim();
+    if (v.indexOf(RELAY + '/') === 0){
+      var rest = v.slice(RELAY.length + 1);
+      var qi = rest.indexOf('?');
+      var path = qi === -1 ? rest : rest.slice(0, qi);
+      // 注意：旧的 ?url= 形态同样以「本站域名/」开头，但此时 path 为空，
+      // 必须放过去交给下面的旧形态分支处理，不能在这里直接返回
+      if (/^https?:\/\//i.test(path)){
+        var keep = [];
+        (qi === -1 ? '' : rest.slice(qi + 1)).split('&').forEach(function(kv){
+          if (!kv) return;
+          if (RESERVED.indexOf(kv.split('=')[0].toLowerCase()) === -1) keep.push(kv);
+        });
+        return path + (keep.length ? '?' + keep.join('&') : '');
+      }
+    }
+    try {
+      var u = new URL(v);
+      if (u.origin === RELAY){
+        var t = u.searchParams.get('url') || u.searchParams.get('u') || u.searchParams.get('q');
+        if (t) return t;
+      }
+    } catch (e) {}
+    return v;
+  }
+
+  // 目标链接自带的 query 里命中保留字时，路径拼接形态会把这些参数吃掉 → 回退 ?url= 形态
+  function needsQueryForm(raw){
+    var qi = raw.indexOf('?');
+    if (qi === -1) return false;
+    var q = raw.slice(qi + 1).split('#')[0];
+    var hit = false;
+    q.split('&').forEach(function(kv){
+      if (kv && RESERVED.indexOf(kv.split('=')[0].toLowerCase()) > -1) hit = true;
+    });
+    return hit;
   }
 
   function build(raw){
+    var extra = [];
     var n = nameI.value.trim(), t = tokenI.value.trim();
-    var u = RELAY + (n ? '/dl/' + encodeURIComponent(n) : '/') + '?url=' + encodeURIComponent(raw);
-    if (t) u += '&token=' + encodeURIComponent(t);
-    return u;
-  }
+    if (n) extra.push('name=' + encodeURIComponent(n));
+    if (t) extra.push('token=' + encodeURIComponent(t));
+    var tail = extra.length ? (needsQueryForm(raw) ? '&' : '?') + extra.join('&') : '';
 
-  // 就地转换：输入原始链接 -> 框内直接变成代理链接
-  function convert(animate){
-    var v = src.value.trim();
-    if (!v){ rawCache = ''; src.removeAttribute('title'); return ''; }
-    if (isRelayed(v)) return v;
-
-    rawCache = v;
-    var out = build(v);
-    src.value = out;
-    src.setAttribute('title', '\u539f\u59cb\u94fe\u63a5\uff1a' + v);
-    try { src.setSelectionRange(out.length, out.length); } catch (e) {}
-    if (animate){
-      bar.classList.remove('flash');
-      void bar.offsetWidth;
-      bar.classList.add('flash');
+    if (needsQueryForm(raw)){
+      return { url: RELAY + '/?url=' + encodeURIComponent(raw) + tail, form: 'query' };
     }
-    return out;
+    return { url: RELAY + '/' + raw + tail, form: 'path' };
   }
 
-  function finalUrl(){
+  function showExample(){
+    outEl.classList.remove('done');
+    $('glabel').textContent = '示例：';
+    $('eg').textContent = EXAMPLE;
+  }
+
+  function setOut(r){
+    outEl.classList.add('done');
+    $('glabel').textContent = r.form === 'query'
+      ? '\u4e2d\u8f6c\u94fe\u63a5\uff08\u76ee\u6807\u5e26\u4fdd\u7559\u53c2\u6570\uff0c\u5df2\u56de\u9000 ?url= \u5f62\u6001\uff09\uff1a'
+      : '\u4e2d\u8f6c\u94fe\u63a5\uff1a';
+    $('eg').textContent = r.url;
+  }
+
+  // 唯一入口：读框内的原始直链 → 生成中转链接（框内内容不变）
+  function refresh(animate){
     var v = src.value.trim();
-    if (!v) return '';
-    return isRelayed(v) ? v : convert(false);
+    if (!v){
+      outCache = '';
+      src.removeAttribute('title');
+      showExample();
+      return '';
+    }
+
+    var raw = unwrap(v);
+    if (raw !== v) src.value = raw;          // 贴进来的是中转链接 → 还原为原始直链
+    raw = normalize(raw);
+    if (raw !== src.value) src.value = raw;  // 补协议头，同样保持"显示原始地址"
+
+    var r = build(raw);
+    outCache = r.url;
+    src.setAttribute('title', '\u4e2d\u8f6c\u94fe\u63a5\uff1a' + r.url);
+    setOut(r);
+    if (animate) flash();
+    return r.url;
   }
 
-  var debounce = null;
   src.addEventListener('input', function(){
     clearTimeout(debounce);
-    debounce = setTimeout(function(){ convert(true); }, 220);
+    debounce = setTimeout(function(){ refresh(true); }, 220);
   });
   src.addEventListener('paste', function(){
     clearTimeout(debounce);
-    setTimeout(function(){ convert(true); }, 0);
+    setTimeout(function(){ refresh(true); }, 0);
   });
   src.addEventListener('keydown', function(e){
-    if (e.key === 'Enter'){ e.preventDefault(); clearTimeout(debounce); convert(true); }
+    if (e.key === 'Enter'){ e.preventDefault(); clearTimeout(debounce); refresh(true); }
   });
   src.addEventListener('blur', function(){
     clearTimeout(debounce);
-    convert(false);
+    refresh(false);
   });
 
-  // 参数变化 -> 用缓存的原始链接重新生成，避免在代理链接上套娃
-  function rebuild(){
-    if (!rawCache) return;
-    var out = build(rawCache);
-    src.value = out;
-    src.setAttribute('title', '\u539f\u59cb\u94fe\u63a5\uff1a' + rawCache);
+  // 高级选项变化 → 直接用框内的原始直链重算
+  nameI.addEventListener('input', function(){ refresh(false); });
+  tokenI.addEventListener('input', function(){ refresh(false); });
+
+  function finalUrl(){
+    if (!src.value.trim()) return '';
+    return outCache || refresh(false);
   }
-  nameI.addEventListener('input', rebuild);
-  tokenI.addEventListener('input', rebuild);
 
   function copyText(text){
     if (navigator.clipboard && navigator.clipboard.writeText){
@@ -942,9 +1063,15 @@ function homePage() {
     }
     return new Promise(function(resolve, reject){
       try {
-        src.select();
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
         var ok = document.execCommand('copy');
-        src.setSelectionRange(text.length, text.length);
+        document.body.removeChild(ta);
         ok ? resolve() : reject(new Error('execCommand failed'));
       } catch (e) { reject(e); }
     });

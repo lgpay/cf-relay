@@ -80,15 +80,30 @@ function stubUpstream(map) {
   const j = await body(r);
   const it = j.items[0];
   check('GET /api/link 单条', j.ok === true && j.count === 1 && it.allowed === true);
-  check('relay_url 落在 /dl/ 且带编码后的 url',
-    it.relay_url.startsWith(`${ORIGIN}/dl/a.zip?url=`) && it.relay_url.includes(encodeURIComponent(SRC)), it.relay_url);
-  check('relay_url_short 为路径拼接形态', it.relay_url_short === `${ORIGIN}/${SRC}`, it.relay_url_short);
+  check('relay_url 默认路径拼接形态（域名后面直接接原始直链）',
+    it.relay_url === `${ORIGIN}/${SRC}`, it.relay_url);
+  check('link_form=path', it.link_form === 'path', it.link_form);
+  check('relay_url_query 作为兜底同样给出',
+    it.relay_url_query === `${ORIGIN}/?url=${encodeURIComponent(SRC)}`, it.relay_url_query);
   check('默认不把令牌写进链接', !it.relay_url.includes('token='));
 
   const withName = await body(await call(`/api/link?url=${encodeURIComponent(SRC)}&name=my%20file.bin`));
-  check('name 参数进 /dl/ 且被 encode', withName.items[0].relay_url.startsWith(`${ORIGIN}/dl/my%20file.bin?`),
-    withName.items[0].relay_url);
+  check('name 追加为 ?name= 而不是改路径',
+    withName.items[0].relay_url === `${ORIGIN}/${SRC}?name=my%20file.bin`, withName.items[0].relay_url);
   check('filename 已清理非法字符', withName.items[0].filename === 'my file.bin');
+
+  // 目标自带保留参数 → 路径拼接形态会把它吃掉，必须自动回退 ?url= 形态
+  const tricky = 'https://cdn.example.com/f.zip?token=abc&x=1';
+  const fb = await body(await call(`/api/link?url=${encodeURIComponent(tricky)}`));
+  check('目标自带保留参数时回退 ?url= 形态',
+    fb.items[0].link_form === 'query'
+      && fb.items[0].relay_url === `${ORIGIN}/?url=${encodeURIComponent(tricky)}`, fb.items[0]);
+  check('回退时 relay_url_query 与 relay_url 一致',
+    fb.items[0].relay_url === fb.items[0].relay_url_query);
+
+  const safe = await body(await call(`/api/link?url=${encodeURIComponent('https://cdn.example.com/f.zip?v=3&x=1')}`));
+  check('非保留参数不触发回退', safe.items[0].link_form === 'path'
+    && safe.items[0].relay_url === `${ORIGIN}/https://cdn.example.com/f.zip?v=3&x=1`);
 }
 
 // 3. 令牌：三种携带方式
@@ -121,7 +136,7 @@ function stubUpstream(map) {
   });
   const j = await body(r);
   check('POST 批量 2 条', r.status === 200 && j.count === 2 && j.items.length === 2);
-  check('body 的 name 生效', j.items.every((i) => i.filename === 'x.tar' && i.relay_url.includes('/dl/x.tar?')));
+  check('body 的 name 生效', j.items.every((i) => i.filename === 'x.tar' && i.relay_url.endsWith('?name=x.tar')));
 
   const dup = await body(await call('/api/link', {
     method: 'POST', body: JSON.stringify({ urls: ['https://a.com/1.zip', 'https://a.com/1.zip'] }),
@@ -254,6 +269,54 @@ function stubUpstream(map) {
   const home = await call('/');
   const html = await home.text();
   check('首页仍是 HTML 且带 API 入口', home.status === 200 && html.includes('<h1>CF Relay</h1>') && html.includes('/api'));
+  check('首页输入框不回填中转链接：只保留原始地址的输出行',
+    html.includes('id="out"') && html.includes('<span id="glabel">') && html.includes('needsQueryForm'));
+  check('首页默认产出路径拼接形态', html.includes("RELAY + '/' + raw"));
+  check('内联模板未被转义破坏（location.origin).replace(/\\/+$/, \'\') 仍在）', (() => {
+    const k = 'location.origin).replace(/';
+    const i = html.indexOf(k) + k.length;
+    return i > k.length - 1
+      && html.slice(i, i + 6).split('').map((c) => c.charCodeAt(0)).join(',') === '92,47,43,36,47,44';
+  })());
+  check('补协议头的正则完好（^https?:\\/* ）', html.includes('https?:\\/*'));
+  globalThis.fetch = realFetch;
+}
+
+// 10. 路径拼接形态的 query 透传规则
+{
+  // 未配 TOKEN：源站自己的 ?token= 不该被吞
+  let seen = '';
+  globalThis.fetch = async (input) => {
+    seen = typeof input === 'string' ? input : input.url;
+    return fakeRes({ status: 200, headers: { 'content-length': '3' }, body: 'abc' });
+  };
+  const r1 = await call('/https://cdn.example.com/f.zip?token=abc&v=2');
+  check('未配 TOKEN 时源站 ?token= 原样透传',
+    r1.status === 200 && seen === 'https://cdn.example.com/f.zip?token=abc&v=2', seen);
+
+  // 配了 TOKEN：token 是访问令牌，必须从透传里剥掉
+  seen = '';
+  const r2 = await call('/https://cdn.example.com/f.zip?token=abc&v=2', { headers: { 'x-api-key': 's3cr3t' } }, { TOKEN: 's3cr3t' });
+  check('配了 TOKEN 时 token 参数被剥离', seen === 'https://cdn.example.com/f.zip?v=2', seen);
+
+  // name 始终是 Worker 的覆盖项，不进上游
+  seen = '';
+  await call('/https://cdn.example.com/f.zip?name=x&v=2');
+  check('name 不进上游请求',
+    seen === 'https://cdn.example.com/f.zip?v=2' && r2.status === 200, seen);
+
+  // 表单编码的 + 号要能还原成空格（页面/cfget 都用 urlencode 生成 name）
+  const plusName = await call('/https://cdn.example.com/f.zip?name=my+file.zip');
+  check('name 里的 + 还原为空格',
+    plusName.headers.get('x-relay-filename') === encodeURIComponent('my file.zip'),
+    plusName.headers.get('x-relay-filename'));
+
+  // 路径拼接形态必须带协议头，否则不匹配路径规则 → 400（所以页面里必须先补 http(s)://）
+  seen = '';
+  const noScheme = await call('/cdn.example.com/f.zip');
+  check('无协议头的路径拼不出目标 → 400（页面因此必须补协议头）',
+    noScheme.status === 400 && seen === '', `${noScheme.status} seen=${seen}`);
+  check('该 400 的报错文案指向两种合法形态', /no target/.test((await body(noScheme)).message));
   globalThis.fetch = realFetch;
 }
 
