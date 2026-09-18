@@ -18,6 +18,7 @@ cf-relay/
 │   └── sync-homepage.py # 把 preview/index.html 同步内联进 Worker 的 homePage()
 ├── worker/              # 云端部分
 │   ├── src/index.js     # Worker 主程序（单文件，可直接粘贴到 Dashboard）
+│   ├── test/api.test.mjs# 接口测试（离线，stub 掉上游请求）
 │   ├── wrangler.toml    # 部署配置 + 环境变量（默认全部注释，即宽松模式）
 │   └── package.json
 └── local/
@@ -79,6 +80,9 @@ curl -s "$W/this-path-does-not-exist"
 
 # ② 必须返回 JSON 探测信息（文件名 / 大小 / 是否支持 Range）
 curl -s "$W/?url=https%3A%2F%2Fexample.com&mode=info"
+
+# ③ 必须返回 {"ok":true,...}，且带 x-relay-version 头
+curl -s "$W/api/health"
 ```
 
 正常工作的 Worker，任何响应都会带 `x-relay-target`（中转时）或 `access-control-allow-origin: *`（所有响应）与 `cache-control: no-store`；静态站点不会有这些头。
@@ -99,13 +103,102 @@ Dashboard → Settings → Variables and Secrets 存为 **Secret**，或本地�
 | 路径拼接 | `https://w.workers.dev/https://a.com/f.zip` | 手敲最快 |
 | 信息探测 | `https://w.workers.dev/?url=<encoded>&mode=info` | 返回 JSON：大小 / 文件名 / 是否支持 Range |
 
-带令牌时追加 `&token=xxx`，或请求头 `Authorization: Bearer xxx`。
+带令牌时追加 `&token=xxx`，或请求头 `Authorization: Bearer xxx`（API 还支持 `X-API-Key`）。
+
+程序化调用（脚本 / 其他服务）见 [三、JSON API](#三json-api)。
 
 直接访问 `https://w.workers.dev/` 得到操作页面：**单框输入原始链接，框内就地变成代理链接**，右侧「打开 ↗」新窗口直接下载、「复制」拿走链接。
 转换是自动的（输入/粘贴后 220ms，回车立即），已经是本 Worker 的链接不会再被套娃包装；框内悬停可看到原始链接。
 底部「参数设置」可填保存文件名与访问令牌，改动后立即按原始链接重算。`Ctrl+Enter` 直接打开。
 
-## 三、改页面
+## 三、JSON API
+
+脚本、其他服务要调用时走 `/api/*`（路径以 `/api` 开头就只走 API 分支，永远返回 JSON，不会被
+`/https://...` 那种路径拼接规则误吞）。**`GET /api` 是自描述索引**，不看文档也能用：
+
+```bash
+W=https://<你的域名>
+
+curl -s "$W/api"                                  # 接口索引 + 每个接口的 curl 示例
+curl -s "$W/api/health"                           # 存活 / 版本 / 是否需令牌
+curl -s "$W/api/link?url=<encoded>"               # 生成中转链接
+curl -s "$W/api/info?url=<encoded>"               # 探测：大小 / 类型 / 是否支持 Range
+curl -s "$W/api/check?url=<encoded>"              # 只做域名策略预检，不发上游请求
+```
+
+| 接口 | 方法 | 需令牌 | 说明 |
+|---|---|---|---|
+| `/api` | GET | 否 | 自描述索引：接口列表、链接形态、curl 示例、当前是否需令牌 |
+| `/api/health` | GET | 否 | `{ok, version, time, token_required}` |
+| `/api/config` | GET | 是 | 当前策略：域名黑白名单、大小上限、缓存 TTL、UA（只回显 `UPSTREAM_HEADERS` 的**键名**） |
+| `/api/link` | GET / POST | 是 | 生成中转链接，支持批量；`info=true` 时顺带探测 |
+| `/api/info` | GET / POST | 是 | 探测上游，HEAD 被拒时自动降级为 1 字节 Range |
+| `/api/check` | GET / POST | 是 | 只判断域名是否放行，**不返回 403**（把结论交给调用方） |
+
+鉴权三选一：`?token=xxx`、`Authorization: Bearer xxx`、`X-API-Key: xxx`。
+`/api` 与 `/api/health` **始终公开**——客户端靠它判断"这个 Worker 要不要令牌"。
+
+### /api/link 返回结构
+
+```json
+{
+  "ok": true,
+  "version": "1.1.0",
+  "count": 1,
+  "allowed": 1,
+  "items": [
+    {
+      "source": "https://example.com/a.zip",
+      "ok": true,
+      "allowed": true,
+      "reason": null,
+      "filename": "a.zip",
+      "relay_url": "https://w.workers.dev/dl/a.zip?url=https%3A%2F%2Fexample.com%2Fa.zip",
+      "relay_url_short": "https://w.workers.dev/https://example.com/a.zip"
+    }
+  ]
+}
+```
+
+批量 + 探测：
+
+```bash
+# GET：重复 url 参数
+curl -s "$W/api/link?url=<a>&url=<b>&name=fix.zip"
+
+# POST：JSON 体，可同时指定每条的 name
+curl -s -X POST "$W/api/link" -H 'content-type: application/json' \
+  -d '{"urls":["https://example.com/a.zip",{"url":"https://example.com/b.zip","name":"b.zip"}],"info":true}'
+```
+
+几个语义约定：
+
+- **`allowed` / `reason` 是策略判定结果，被拦时照样返回 `relay_url`**。`/api/link` 与 `/api/check`
+  只负责给数据，真正下载时才 403 —— 调用方按 `allowed` 决定用不用。
+- **`info.ok` 是「上游是否 2xx」，外层 `ok` 是「接口是否成功」**，两者不要混。
+- **默认不把令牌写进链接**（否则会随日志、转发、分享外泄）。需要"拿去就能打开"的链接时传
+  `embed_token=1`（令牌取 `token` 参数或请求体里的 `token`）。
+- 单次最多 50 条（`/api/config` 里的 `max_batch`），超出返回 413。
+
+### 错误格式
+
+```json
+{ "ok": false, "error": true, "status": 403, "code": "FORBIDDEN",
+  "message": "host not in allow list: evil.com" }
+```
+
+`code` 取值：`NO_TARGET` `BAD_JSON` `BAD_BODY` `TOO_MANY_URLS` `BODY_TOO_LARGE` `UNAUTHORIZED`
+`FORBIDDEN` `NOT_FOUND` `METHOD_NOT_ALLOWED` `TOO_LARGE` `UPSTREAM_FAILED` `INTERNAL_ERROR`。
+
+所有响应都带 `x-relay-version`，方便确认线上跑的是哪一版。
+
+### 测试
+
+```bash
+cd worker && npm test      # 50 条断言，离线跑（stub 掉上游请求），不联网、不需要账号
+```
+
+## 四、改页面
 
 页面只有一份源文件 `preview/index.html`，Worker 首页是它同步内联的结果：
 
@@ -116,7 +209,7 @@ cd worker && npm run deploy
 
 `preview/index.html` 本地双击即可预览（file:// 下用占位域名，页脚会提示）。
 
-## 四、环境变量（全部可选，不配就是宽松模式）
+## 五、环境变量（全部可选，不配就是宽松模式）
 
 | 变量 | 作用 | 建议 |
 |---|---|---|
@@ -132,7 +225,7 @@ cd worker && npm run deploy
 
 改完 `wrangler.toml` 后重新 `npm run deploy`；Dashboard 方式在「设置 → 变量」里改。
 
-## 五、本地下载
+## 六、本地下载
 
 `cfget.py` 只用 Python 标准库。
 
@@ -165,7 +258,7 @@ python cfget.py "https://example.com/a.zip" -H "Referer: https://example.com" --
 
 断点续传：下载中生成一个 `<file>.part` 与 `<file>.part.json`（分块进度），中断后重跑同一条命令自动续传。
 
-## 六、已知边界
+## 七、已知边界
 
 - Workers 免费版每天 10 万请求、单次 CPU 10ms；**流式转发不占 CPU**，但超大文件（GB 级）建议仍走直连或 R2。
 - Worker 转发时会强制 `Accept-Encoding: identity`，保证 `Content-Length` 与 Range 语义一致（代价：源站的 gzip 压缩失效，流量略增）。

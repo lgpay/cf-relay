@@ -51,6 +51,8 @@
   .foot{margin-top:34px;text-align:center;color:var(--sub);font-size:12px;line-height:2.1}
   .foot code{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;background:var(--card);
     border:1px solid var(--line);border-radius:5px;padding:2px 6px;color:var(--fg);word-break:break-all}
+  .foot a{color:inherit;text-underline-offset:2px;text-decoration-color:var(--line)}
+  .foot a:hover{color:var(--fg);text-decoration-color:currentColor}
   .adv{margin-top:26px}
   .adv summary{list-style:none;cursor:pointer;color:var(--sub);font-size:12px;text-align:center}
   .adv summary::-webkit-details-marker{display:none}
@@ -93,6 +95,8 @@
 
   <p class="foot">
     也可以在地址栏直接拼接：<code id="eg"></code><br>
+    <span id="api" hidden>程序化调用：<a id="apilink" href="/api">JSON API</a>
+      <code>/api/link</code> <code>/api/info</code> <code>/api/check</code></span>
     <span id="note" hidden>当前是本地预览，域名是占位符；部署到 Cloudflare 后会自动换成你自己的 Worker 域名</span>
     <span id="ready" hidden>输入即生成中转链接 · 支持 Range 断点续传 · 大文件建议用 cfget.py 多线程下载</span>
   </p>
@@ -112,6 +116,8 @@
   $('eg').textContent = RELAY + '/https://example.com/file.zip';
   $('note').hidden = !IS_FILE;
   $('ready').hidden = IS_FILE;
+  $('api').hidden = IS_FILE;
+  $('apilink').setAttribute('href', RELAY + '/api');
 
   function toast(msg){
     toastEl.textContent = msg;

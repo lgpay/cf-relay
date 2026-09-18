@@ -1,14 +1,21 @@
 /**
  * CF Relay —— 通用 HTTP(S) 下载中转（Cloudflare Worker）
  *
- * 支持三种链接形态：
+ * 【一、链接形态】把原始直链包装成中转链接：
  *   1) 查询参数：  https://<worker>/?url=https%3A%2F%2Fexample.com%2Fa.zip
  *   2) 带文件名：  https://<worker>/dl/my%20file.zip?url=<encoded>
  *   3) 路径拼接：  https://<worker>/https://example.com/a.zip
+ *   &mode=info   → 只探测，返回 JSON（HEAD 上游）
+ *   GET /        → 操作页面，粘贴直链生成中转链接
  *
- * 额外接口：
- *   &mode=info   → 返回 JSON 探测信息（文件名 / 大小 / 是否支持断点续传），只发 HEAD
- *   GET /        → 简易网页，粘贴原链生成中转链接
+ * 【二、JSON API】自描述索引见 GET /api，全部返回 JSON：
+ *   GET      /api         接口索引 + curl 示例（公开）
+ *   GET      /api/health  存活 / 版本 / 是否需令牌（公开）
+ *   GET      /api/config  当前策略：域名名单、大小上限、缓存 TTL……（需令牌）
+ *   GET|POST /api/link    生成中转链接，支持批量；POST 可带 info:true 一并探测（需令牌）
+ *   GET|POST /api/info    探测上游：大小 / 类型 / 是否支持 Range（需令牌）
+ *   GET|POST /api/check   只做策略预检（域名黑白名单），不发上游请求（需令牌）
+ *   鉴权三选一：?token=xxx / Authorization: Bearer xxx / X-API-Key: xxx
  *
  * 环境变量（全部可选，不配即用默认宽松策略）：
  *   TOKEN            访问令牌，命中后必须 ?token=xxx 或 Authorization: Bearer xxx
@@ -27,12 +34,31 @@ const HOP_BY_HOP = [
   'te', 'trailer', 'transfer-encoding', 'upgrade',
 ];
 
+const RELAY_VERSION = '1.1.0';
+const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) CF-Relay/1.0';
+const API_MAX_BATCH = 50;              // 单次批量最多处理多少个 url
+const API_MAX_BODY = 64 * 1024;        // POST 请求体上限
+
+/** 业务异常：统一转成 JSON 错误响应 */
+class ApiError extends Error {
+  constructor(status, message, code) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders() });
+    }
+
+    // JSON API 命名空间：独立分支，任何情况都返回 JSON，不做链接形态解析
+    if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
+      return await handleApi(request, env, url);
     }
 
     // 无参数访问根路径 → 返回生成中转链接的小页面
@@ -44,6 +70,7 @@ export default {
           // 必须显式 no-store：否则首页可能被边缘/浏览器缓存，
           // 在 cache key 忽略 query string 时，带 ?url= 的请求会拿到缓存的首页 HTML
           'cache-control': 'no-store, max-age=0',
+          'x-relay-version': RELAY_VERSION,
           ...corsHeaders(),
         },
       });
@@ -83,6 +110,7 @@ function hasTargetParam(url) {
 
 function checkToken(request, url, token) {
   if (url.searchParams.get('token') === token) return true;
+  if (request.headers.get('x-api-key') === token) return true;
   const auth = request.headers.get('authorization') || '';
   return auth === `Bearer ${token}`;
 }
@@ -90,21 +118,35 @@ function checkToken(request, url, token) {
 function corsHeaders() {
   return {
     'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET, HEAD, OPTIONS',
+    'access-control-allow-methods': 'GET, HEAD, POST, OPTIONS',
     'access-control-allow-headers': '*',
+    'access-control-expose-headers':
+      'content-length, content-range, accept-ranges, content-disposition, ' +
+      'x-relay-target, x-relay-filename, x-relay-version',
     'access-control-max-age': '86400',
   };
 }
 
-function jsonError(status, message) {
-  return new Response(JSON.stringify({ error: true, status, message }, null, 2), {
-    status,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store, max-age=0',
-      ...corsHeaders(),
+function jsonError(status, message, code) {
+  return new Response(
+    JSON.stringify({ ok: false, error: true, status, code: code || httpCode(status), message }, null, 2),
+    {
+      status,
+      headers: {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store, max-age=0',
+        'x-relay-version': RELAY_VERSION,
+        ...corsHeaders(),
+      },
     },
-  });
+  );
+}
+
+function httpCode(status) {
+  return {
+    400: 'BAD_REQUEST', 401: 'UNAUTHORIZED', 403: 'FORBIDDEN', 404: 'NOT_FOUND',
+    405: 'METHOD_NOT_ALLOWED', 413: 'TOO_LARGE', 502: 'UPSTREAM_FAILED',
+  }[status] || 'ERROR';
 }
 
 /** 从请求里还原出原始下载链接 */
@@ -194,32 +236,66 @@ function isPrivateHost(host) {
 
 /* -------------------------------- 探测接口 -------------------------------- */
 
-async function probe(target, env, reqUrl) {
-  const upstream = await fetch(target, {
-    method: 'HEAD',
-    headers: buildUpstreamHeaders(null, env, reqUrl),
-    redirect: 'follow',
-  });
-  const len = upstream.headers.get('content-length');
-  const info = {
+/** 探测上游文件信息；HEAD 被拒或拿不到大小时，用 Range: bytes=0-0 兜底 */
+async function probeInfo(target, env, reqUrl, extraHeaders) {
+  const base = buildUpstreamHeaders(extraHeaders || null, env, reqUrl);
+  let info = null;
+  let headOk = true;
+
+  try {
+    const up = await fetch(target, { method: 'HEAD', headers: base, redirect: 'follow' });
+    if (up.status < 400) info = describeUpstream(target, reqUrl, up);
+    else headOk = false;
+  } catch (_) {
+    headOk = false;
+  }
+
+  if (!info || info.content_length === null) {
+    const h = new Headers(base);
+    h.set('range', 'bytes=0-0');
+    const up2 = await fetch(target, { method: 'GET', headers: h, redirect: 'follow' });
+    const alt = describeUpstream(target, reqUrl, up2);
+    if (up2.body) { try { await up2.body.cancel(); } catch (_) { /* 忽略 */ } }
+    alt.size_source = up2.status === 206 ? 'content-range' : 'content-length';
+    if (!info || alt.content_length !== null) info = alt;
+  }
+
+  if (!info) throw new Error('upstream did not answer HEAD or Range probe');
+  info.head_supported = headOk;
+  return info;
+}
+
+function describeUpstream(target, reqUrl, res) {
+  const rawLen = (res.headers.get('content-length') || '').trim();
+  let size = /^\d+$/.test(rawLen) ? Number(rawLen) : null;
+  let rangeOk = (res.headers.get('accept-ranges') || '').toLowerCase().includes('bytes');
+
+  const cr = res.headers.get('content-range') || '';
+  if (cr.includes('/')) {
+    const total = cr.split('/').pop().trim();
+    if (/^\d+$/.test(total)) { size = Number(total); rangeOk = true; }
+  }
+
+  return {
     url: target,
-    final_url: upstream.url || target,
-    status: upstream.status,
-    ok: upstream.ok,
-    content_length: len ? Number(len) : null,
-    content_type: upstream.headers.get('content-type'),
-    accept_ranges: upstream.headers.get('accept-ranges') || '',
-    supports_range: (upstream.headers.get('accept-ranges') || '').toLowerCase().includes('bytes'),
-    filename: guessName(target, upstream.headers.get('content-disposition'), reqUrl),
+    final_url: res.url || target,
+    status: res.status,
+    ok: res.ok,
+    content_length: size,
+    size_human: humanSize(size),
+    content_type: res.headers.get('content-type'),
+    accept_ranges: res.headers.get('accept-ranges') || (cr ? 'bytes' : ''),
+    supports_range: rangeOk,
+    last_modified: res.headers.get('last-modified'),
+    etag: res.headers.get('etag'),
+    filename: guessName(target, res.headers.get('content-disposition'), reqUrl),
+    size_source: /^\d+$/.test(rawLen) ? 'content-length' : null,
   };
-  return new Response(JSON.stringify(info, null, 2), {
-    status: 200,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store, max-age=0',
-      ...corsHeaders(),
-    },
-  });
+}
+
+/** 兼容旧接口：?url=<encoded>&mode=info 仍返回裸 info 对象 */
+async function probe(target, env, reqUrl, extraHeaders) {
+  return apiJson(await probeInfo(target, env, reqUrl, extraHeaders));
 }
 
 /* -------------------------------- 中转主体 -------------------------------- */
@@ -250,6 +326,7 @@ async function relay(request, target, env, reqUrl) {
   headers.delete('set-cookie2');
   headers.set('accept-ranges', headers.get('accept-ranges') || 'bytes');
   headers.set('x-relay-target', target);
+  headers.set('x-relay-version', RELAY_VERSION);
   headers.set('timing-allow-origin', '*');
   for (const [k, v] of Object.entries(corsHeaders())) headers.set(k, v);
 
@@ -328,6 +405,341 @@ function contentDisposition(name) {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
+/* --------------------------------- JSON API --------------------------------- */
+/*
+ * 与链接形态完全分离的一层：路径以 /api 开头就只走这里，永远返回 JSON，
+ * 不会被 /https://... 那种路径拼接规则误吞。
+ */
+
+async function handleApi(request, env, url) {
+  const path = url.pathname.replace(/\/+$/, '').toLowerCase() || '/api';
+  const isRead = request.method === 'GET' || request.method === 'HEAD';
+  const isWrite = request.method === 'POST';
+
+  try {
+    // 两个公开接口：客户端靠它判断"这个 Worker 要不要令牌"，不该被鉴权挡住
+    if (path === '/api' || path === '/api/index' || path === '/api/docs') {
+      if (!isRead) throw new ApiError(405, 'GET / HEAD only', 'METHOD_NOT_ALLOWED');
+      return apiJson(apiIndex(url, env));
+    }
+    if (path === '/api/health') {
+      if (!isRead) throw new ApiError(405, 'GET / HEAD only', 'METHOD_NOT_ALLOWED');
+      return apiJson({
+        ok: true,
+        service: 'cf-relay',
+        version: RELAY_VERSION,
+        time: new Date().toISOString(),
+        token_required: Boolean(env.TOKEN),
+      });
+    }
+
+    if (env.TOKEN && !checkToken(request, url, env.TOKEN)) {
+      throw new ApiError(401, 'missing or invalid token', 'UNAUTHORIZED');
+    }
+
+    switch (path) {
+      case '/api/config':
+        if (!isRead) throw new ApiError(405, 'GET / HEAD only', 'METHOD_NOT_ALLOWED');
+        return apiJson(apiConfig(env));
+
+      case '/api/link':
+        if (!isRead && !isWrite) throw new ApiError(405, 'GET / HEAD / POST only', 'METHOD_NOT_ALLOWED');
+        return await apiLink(request, env, url);
+
+      case '/api/info':
+      case '/api/probe':
+        if (!isRead && !isWrite) throw new ApiError(405, 'GET / HEAD / POST only', 'METHOD_NOT_ALLOWED');
+        return await apiInfo(request, env, url);
+
+      case '/api/check':
+        if (!isRead && !isWrite) throw new ApiError(405, 'GET / HEAD / POST only', 'METHOD_NOT_ALLOWED');
+        return await apiCheck(request, env, url);
+
+      default:
+        throw new ApiError(404, `unknown endpoint: ${path}，可用接口见 ${url.origin}/api`, 'NOT_FOUND');
+    }
+  } catch (e) {
+    if (e instanceof ApiError) return jsonError(e.status, e.message, e.code);
+    return jsonError(500, `api failed: ${(e && e.message) || e}`, 'INTERNAL_ERROR');
+  }
+}
+
+/** 生成中转链接（不请求上游，纯计算） */
+async function apiLink(request, env, reqUrl) {
+  const p = await readApiParams(request, reqUrl);
+  const items = p.urls.map((it) => buildLinkItem(it, p, env, reqUrl));
+
+  if (p.info) {
+    await Promise.all(items.map(async (item) => {
+      if (!item.allowed) return;
+      try { item.info = await probeInfo(item.source, env, reqUrl); }
+      catch (e) { item.info = { error: String((e && e.message) || e) }; }
+    }));
+  }
+
+  return apiJson({
+    ok: true,
+    version: RELAY_VERSION,
+    count: items.length,
+    allowed: items.filter((i) => i.allowed).length,
+    items,
+  });
+}
+
+/** 探测上游文件信息（会真实请求上游，HEAD 优先，必要时降级到 1 字节 Range） */
+async function apiInfo(request, env, reqUrl) {
+  const p = await readApiParams(request, reqUrl);
+  const items = [];
+  for (const it of p.urls) {
+    const item = buildLinkItem(it, p, env, reqUrl);
+    if (!item.allowed) {
+      item.reason = item.reason || 'blocked by policy';
+    } else {
+      try { item.info = await probeInfo(item.source, env, reqUrl); }
+      catch (e) { item.info = { error: String((e && e.message) || e) }; }
+    }
+    items.push(item);
+  }
+  return apiJson({ ok: true, version: RELAY_VERSION, count: items.length, items });
+}
+
+/** 只做策略预检：不发上游请求，也不返回 403 —— 把判断结果交给调用方 */
+async function apiCheck(request, env, reqUrl) {
+  const p = await readApiParams(request, reqUrl);
+  const items = p.urls.map((it) => {
+    const out = { source: it.url, allowed: false, host: '', reason: null };
+    try {
+      const target = normalizeUrl(it.url);
+      out.source = target;
+      out.host = new URL(target).hostname.toLowerCase();
+      const guard = checkHost(target, env);
+      out.allowed = !guard;
+      out.reason = guard || null;
+    } catch (e) {
+      out.reason = `invalid url: ${(e && e.message) || e}`;
+    }
+    return out;
+  });
+  return apiJson({
+    ok: true,
+    version: RELAY_VERSION,
+    count: items.length,
+    allowed: items.filter((i) => i.allowed).length,
+    items,
+  });
+}
+
+/** 单条：给出中转链接 + 策略判定结果。注意即使用户域名被拦，也照样返回链接，由调用方决定 */
+function buildLinkItem(it, p, env, reqUrl) {
+  const item = {
+    source: it.url, ok: false, allowed: false, reason: null,
+    filename: '', relay_url: '', relay_url_short: '',
+  };
+
+  let target;
+  try {
+    target = normalizeUrl(it.url);
+  } catch (e) {
+    item.reason = `invalid url: ${(e && e.message) || e}`;
+    return item;
+  }
+  item.source = target;
+
+  const guard = checkHost(target, env);
+  item.allowed = !guard;
+  item.reason = guard || null;
+  item.ok = item.allowed;
+
+  const override = it.name || p.name || '';
+  item.filename = override ? safeName(override) : guessName(target, null, null);
+  item.relay_url = buildRelayUrl(reqUrl.origin, target, item.filename, p);
+  item.relay_url_short = target.includes('#') ? '' : `${reqUrl.origin}/${target}`;
+  return item;
+}
+
+function buildRelayUrl(origin, target, name, p) {
+  const qs = new URLSearchParams();
+  qs.set('url', target);
+  // 默认不把令牌写进链接（会随日志/分享外泄），需要时显式 embed_token=1
+  if (p && p.embed_token && p.token) qs.set('token', p.token);
+  const base = name ? `${origin}/dl/${encodeURIComponent(name)}` : `${origin}/`;
+  return `${base}?${qs.toString()}`;
+}
+
+/** 读取 GET query 与 POST JSON 体，统一成 { urls:[{url,name}], name, token, info, embed_token } */
+async function readApiParams(request, reqUrl) {
+  const on = (v) => ['1', 'true', 'yes', 'on'].includes(String(v == null ? '' : v).toLowerCase());
+  const p = {
+    urls: [],
+    name: reqUrl.searchParams.get('name') || '',
+    token: reqUrl.searchParams.get('token') || '',
+    info: on(reqUrl.searchParams.get('info')),
+    embed_token: on(reqUrl.searchParams.get('embed_token')),
+  };
+
+  // url / u / q 可重复出现，实现 GET 批量
+  for (const k of ['url', 'u', 'q']) {
+    for (const v of reqUrl.searchParams.getAll(k)) {
+      if (v.trim()) p.urls.push({ url: v.trim(), name: '' });
+    }
+  }
+
+  if (request.method === 'POST') {
+    const raw = await readBody(request);
+    if (raw.trim()) {
+      let body;
+      try { body = JSON.parse(raw); }
+      catch (_) { throw new ApiError(400, 'request body is not valid JSON', 'BAD_JSON'); }
+      if (Array.isArray(body)) body = { urls: body };
+      if (!body || typeof body !== 'object') {
+        throw new ApiError(400, 'body must be a JSON object or array', 'BAD_BODY');
+      }
+      const list = body.urls !== undefined ? body.urls : body.url;
+      for (const it of (Array.isArray(list) ? list : [list])) {
+        if (typeof it === 'string') {
+          if (it.trim()) p.urls.push({ url: it.trim(), name: '' });
+        } else if (it && typeof it === 'object' && it.url) {
+          p.urls.push({ url: String(it.url).trim(), name: it.name ? String(it.name) : '' });
+        }
+      }
+      if (body.name !== undefined) p.name = String(body.name);
+      if (body.token !== undefined) p.token = String(body.token);
+      if (body.info !== undefined) p.info = on(body.info);
+      if (body.embed_token !== undefined) p.embed_token = on(body.embed_token);
+    }
+  }
+
+  // 去重（保序）
+  const seen = new Set();
+  p.urls = p.urls.filter((it) => {
+    const k = `${it.url}\u0000${it.name}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  if (!p.urls.length) {
+    throw new ApiError(400, 'no target: 用 ?url=<encoded> 或 POST {"urls":[...]}', 'NO_TARGET');
+  }
+  if (p.urls.length > API_MAX_BATCH) {
+    throw new ApiError(413, `too many urls: ${p.urls.length} > ${API_MAX_BATCH}`, 'TOO_MANY_URLS');
+  }
+  return p;
+}
+
+async function readBody(request) {
+  const buf = await request.arrayBuffer();
+  if (buf.byteLength > API_MAX_BODY) {
+    throw new ApiError(413, `request body too large: ${buf.byteLength} > ${API_MAX_BODY}`, 'BODY_TOO_LARGE');
+  }
+  return new TextDecoder().decode(buf);
+}
+
+function apiConfig(env) {
+  let upstreamHeaderKeys = [];
+  if (env.UPSTREAM_HEADERS) {
+    try { upstreamHeaderKeys = Object.keys(JSON.parse(env.UPSTREAM_HEADERS)); } catch (_) { /* 配错就忽略 */ }
+  }
+  return {
+    ok: true,
+    service: 'cf-relay',
+    version: RELAY_VERSION,
+    token_required: Boolean(env.TOKEN),
+    allow_hosts: splitList(env.ALLOW_HOSTS),
+    deny_hosts: splitList(env.DENY_HOSTS),
+    allow_private: env.ALLOW_PRIVATE === '1',
+    max_bytes: Number(env.MAX_BYTES || 0),
+    cache_ttl: Number(env.CACHE_TTL || 0),
+    user_agent: env.UA || DEFAULT_UA,
+    referer: env.REFERER || '',
+    upstream_header_keys: upstreamHeaderKeys, // 只暴露键名，不暴露值
+    max_batch: API_MAX_BATCH,
+    endpoints: ['/api', '/api/health', '/api/config', '/api/link', '/api/info', '/api/check'],
+  };
+}
+
+/** 自描述索引：让调用方不用看文档也能知道怎么用 */
+function apiIndex(reqUrl, env) {
+  const o = reqUrl.origin;
+  const E = encodeURIComponent;
+  return {
+    ok: true,
+    service: 'cf-relay',
+    version: RELAY_VERSION,
+    description: '把 HTTP(S) 下载直链包装成 Cloudflare Worker 中转链接；中转链接本身即可直接下载，支持 Range 断点续传。',
+    auth: {
+      required: Boolean(env && env.TOKEN),
+      methods: ['?token=xxx', 'Authorization: Bearer xxx', 'X-API-Key: xxx'],
+      note: '/api 与 /api/health 始终公开，其余接口在 Worker 配置了 TOKEN 时才需要令牌',
+    },
+    max_batch: API_MAX_BATCH,
+    endpoints: [
+      {
+        method: 'GET', path: '/api', auth: false,
+        desc: '本索引。',
+        example: `${o}/api`,
+      },
+      {
+        method: 'GET', path: '/api/health', auth: false,
+        desc: '存活检测：版本、时间、是否需令牌。',
+        example: `${o}/api/health`,
+      },
+      {
+        method: 'GET', path: '/api/config', auth: true,
+        desc: '当前策略：域名黑白名单、大小上限、缓存 TTL、User-Agent 等。',
+        example: `${o}/api/config`,
+      },
+      {
+        method: 'GET / POST', path: '/api/link', auth: true,
+        desc: '生成中转链接。GET 用重复的 url 参数批量，POST 用 {"urls":[...]}；加 info=true 会顺带探测。',
+        example: `${o}/api/link?url=${E('https://example.com/a.zip')}`,
+        example_post: `curl -X POST ${o}/api/link -H 'content-type: application/json' `
+          + `-d '{"urls":["https://example.com/a.zip"],"info":true}'`,
+      },
+      {
+        method: 'GET / POST', path: '/api/info', auth: true,
+        desc: '探测上游：大小、类型、是否支持 Range、最终 URL（跟随 302 后）。',
+        example: `${o}/api/info?url=${E('https://example.com/a.zip')}`,
+      },
+      {
+        method: 'GET', path: '/api/check', auth: true,
+        desc: '策略预检：只判断域名是否放行，不发上游请求，不返回 403。',
+        example: `${o}/api/check?url=${E('https://example.com/a.zip')}`,
+      },
+    ],
+    link_forms: {
+      query: `${o}/?url=${E('https://example.com/a.zip')}`,
+      with_name: `${o}/dl/${encodeURIComponent('a.zip')}?url=${E('https://example.com/a.zip')}`,
+      path_join: `${o}/https://example.com/a.zip`,
+      probe: `${o}/?url=${E('https://example.com/a.zip')}&mode=info`,
+    },
+    notes: [
+      '中转链接与 API 共用同一套域名白/黑名单与 SSRF 防护，被拦时下载会得到 403 JSON。',
+      'relay_url 默认不含令牌；需要「拿去就能打开」的链接时传 embed_token=1，令牌会被写进链接。',
+      'Worker 转发时强制 Accept-Encoding: identity，因此 content_length 与实际字节数一致。',
+    ],
+  };
+}
+
+function apiJson(obj, status = 200) {
+  return new Response(JSON.stringify(obj, null, 2), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store, max-age=0',
+      'x-relay-version': RELAY_VERSION,
+      ...corsHeaders(),
+    },
+  });
+}
+
+function humanSize(n) {
+  if (!n || n <= 0) return null;
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(Math.max(Math.floor(Math.log(n) / Math.log(1024)), 0), units.length - 1);
+  return `${(n / 1024 ** i).toFixed(2)}${units[i]}`;
+}
+
 /* -------------------------------- 首页页面 -------------------------------- */
 
 // 注意：下方用 String.raw 包裹，避免 HTML 内嵌 JS 的正则被模板字符串转义
@@ -385,6 +797,8 @@ function homePage() {
   .foot{margin-top:34px;text-align:center;color:var(--sub);font-size:12px;line-height:2.1}
   .foot code{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;background:var(--card);
     border:1px solid var(--line);border-radius:5px;padding:2px 6px;color:var(--fg);word-break:break-all}
+  .foot a{color:inherit;text-underline-offset:2px;text-decoration-color:var(--line)}
+  .foot a:hover{color:var(--fg);text-decoration-color:currentColor}
   .adv{margin-top:26px}
   .adv summary{list-style:none;cursor:pointer;color:var(--sub);font-size:12px;text-align:center}
   .adv summary::-webkit-details-marker{display:none}
@@ -427,6 +841,8 @@ function homePage() {
 
   <p class="foot">
     也可以在地址栏直接拼接：<code id="eg"></code><br>
+    <span id="api" hidden>程序化调用：<a id="apilink" href="/api">JSON API</a>
+      <code>/api/link</code> <code>/api/info</code> <code>/api/check</code></span>
     <span id="note" hidden>当前是本地预览，域名是占位符；部署到 Cloudflare 后会自动换成你自己的 Worker 域名</span>
     <span id="ready" hidden>输入即生成中转链接 · 支持 Range 断点续传 · 大文件建议用 cfget.py 多线程下载</span>
   </p>
@@ -446,6 +862,8 @@ function homePage() {
   $('eg').textContent = RELAY + '/https://example.com/file.zip';
   $('note').hidden = !IS_FILE;
   $('ready').hidden = IS_FILE;
+  $('api').hidden = IS_FILE;
+  $('apilink').setAttribute('href', RELAY + '/api');
 
   function toast(msg){
     toastEl.textContent = msg;
