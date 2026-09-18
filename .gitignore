@@ -1,0 +1,16 @@
+# Worker 依赖与本地开发产物
+node_modules/
+.wrangler/
+.dev.vars
+
+# 本地下载器产生的中间文件
+__pycache__/
+*.pyc
+*.part
+*.part.json
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
