@@ -795,84 +795,169 @@ function homePage() {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>CF Relay · 下载链接中转</title>
 <style>
   :root{
-    --bg:#f5f6f7; --fg:#0c0d0f; --sub:#9aa0a6; --card:#ffffff;
-    --line:#e8eaed; --solid:#111214; --solid-fg:#ffffff;
-    --ico-bg:#eaf1ff; --ico-fg:#2f6fed;
-    --shadow:0 1px 2px rgba(16,24,40,.05), 0 14px 34px rgba(16,24,40,.07);
+    --bg:#f6f7f9; --fg:#0b0c0e; --fg-2:#3f444b; --sub:#6b7178; --card:#ffffff;
+    --line:#e7e9ee; --line2:#f1f2f5;
+    --solid-a:#1d2025; --solid-b:#0a0b0d; --solid-fg:#ffffff;
+    --accent:#4f7cff; --accent-2:#8f6cff;
+    --ico-bg:linear-gradient(150deg,#eaf1ff,#f2ecff); --ico-fg:#3f6bff;
+    --glow-1:rgba(79,124,255,.17); --glow-2:rgba(143,108,255,.13);
+    --soft:rgba(16,24,40,.035);
+    --shadow:0 1px 1px rgba(16,24,40,.04),0 10px 24px -8px rgba(16,24,40,.10),0 30px 60px -26px rgba(16,24,40,.20);
+    --ring:0 0 0 4px rgba(79,124,255,.14);
   }
   @media (prefers-color-scheme:dark){
     :root{
-      --bg:#0a0b0d; --fg:#f1f2f4; --sub:#8a9099; --card:#141619;
-      --line:#282c31; --solid:#f1f2f4; --solid-fg:#0c0d0f;
-      --ico-bg:#16233c; --ico-fg:#6ea8ff;
-      --shadow:0 1px 2px rgba(0,0,0,.5), 0 18px 44px rgba(0,0,0,.45);
+      --bg:#08090b; --fg:#f0f1f4; --fg-2:#c3c8d0; --sub:#9aa0a9; --card:#131519;
+      --line:#272b31; --line2:#1b1e23;
+      --solid-a:#f5f6f8; --solid-b:#d9dbe0; --solid-fg:#0b0c0e;
+      --accent:#6d95ff; --accent-2:#a98cff;
+      --ico-bg:linear-gradient(150deg,#16233c,#221a3d); --ico-fg:#7fa7ff;
+      --glow-1:rgba(79,124,255,.20); --glow-2:rgba(143,108,255,.16);
+      --soft:rgba(255,255,255,.04);
+      --shadow:0 1px 1px rgba(0,0,0,.5),0 14px 30px -10px rgba(0,0,0,.55),0 40px 80px -30px rgba(0,0,0,.6);
+      --ring:0 0 0 4px rgba(109,149,255,.18);
     }
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--fg);
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0;color:var(--fg);
+    background:
+      radial-gradient(880px 420px at 50% -180px,var(--glow-1),transparent 70%),
+      radial-gradient(700px 340px at 88% -80px,var(--glow-2),transparent 72%),
+      radial-gradient(620px 320px at 6% -40px,rgba(70,200,215,.10),transparent 72%),
+      var(--bg);
+    background-attachment:fixed;
     font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
-    -webkit-font-smoothing:antialiased}
-  main{max-width:800px;margin:0 auto;padding:96px 24px 72px}
-  h1{margin:0 0 16px;font-size:46px;line-height:1.1;font-weight:700;letter-spacing:-.025em;text-align:center}
-  .sub{margin:0 auto 60px;max-width:470px;text-align:center;color:var(--sub);font-size:14px;line-height:1.9}
-  .bar{display:flex;align-items:center;gap:10px;background:var(--card);border-radius:14px;
-    padding:10px 10px 10px 14px;box-shadow:var(--shadow);transition:box-shadow .18s}
-  .bar:focus-within{box-shadow:inset 0 0 0 1.5px var(--ico-fg), var(--shadow)}
+    -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+  ::selection{background:rgba(79,124,255,.22)}
+  main{max-width:760px;margin:0 auto;padding:92px 24px 80px}
+
+  @keyframes rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+  .mark,h1,.sub,.bar,.result,.chips,.adv,.foot{animation:rise .62s cubic-bezier(.22,.86,.28,1) both}
+  .mark{animation-delay:.02s} h1{animation-delay:.07s} .sub{animation-delay:.12s}
+  .bar{animation-delay:.17s} .result{animation-delay:.22s} .chips{animation-delay:.27s}
+  .adv{animation-delay:.32s} .foot{animation-delay:.37s}
+  @media (prefers-reduced-motion:reduce){
+    *{animation:none !important;transition:none !important}
+  }
+
+  .mark{width:56px;height:56px;margin:0 auto 26px;border-radius:17px;
+    background:linear-gradient(140deg,#5b83ff,#8f6cff);color:#fff;
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:0 10px 22px -8px rgba(79,124,255,.55),0 2px 6px rgba(16,24,40,.10)}
+  h1{margin:0 0 18px;font-size:46px;line-height:1.1;font-weight:700;letter-spacing:-.03em;text-align:center;
+    background:linear-gradient(180deg,var(--fg),var(--fg-2));
+    -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:var(--fg)}
+  .sub{margin:0 auto 52px;max-width:498px;text-align:center;color:var(--sub);font-size:14.5px;line-height:1.88}
+
+  .bar{display:flex;align-items:center;gap:11px;background:var(--card);border-radius:18px;
+    padding:11px 11px 11px 16px;border:1px solid var(--line2);box-shadow:var(--shadow);
+    transition:box-shadow .22s cubic-bezier(.22,.86,.28,1),border-color .22s}
+  .bar:hover{border-color:var(--line)}
+  .bar:focus-within{border-color:transparent;box-shadow:var(--ring),var(--shadow)}
   @keyframes flash{
-    0%{box-shadow:inset 0 0 0 1.5px var(--ico-fg), var(--shadow)}
+    0%{box-shadow:var(--ring),var(--shadow)}
     100%{box-shadow:var(--shadow)}
   }
   .bar.flash{animation:flash .9s ease-out}
-  .ico{flex:none;width:30px;height:30px;border-radius:8px;background:var(--ico-bg);color:var(--ico-fg);
+  .ico{flex:none;width:34px;height:34px;border-radius:11px;background:var(--ico-bg);color:var(--ico-fg);
     display:flex;align-items:center;justify-content:center}
   input{flex:1;min-width:0;border:0;background:transparent;color:var(--fg);font:inherit;font-size:14.5px;
     padding:12px 2px;outline:none}
   input::placeholder{color:var(--sub)}
-  button{flex:none;display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:13.5px;
-    cursor:pointer;border-radius:10px;padding:11px 16px;border:1px solid transparent;
-    white-space:nowrap;transition:opacity .15s,border-color .15s}
-  .solid{background:var(--solid);color:var(--solid-fg);border-color:var(--solid)}
-  .solid:hover{opacity:.86}
-  .ghost{background:var(--card);color:var(--fg);border-color:var(--line)}
-  .ghost:hover{border-color:var(--sub)}
-  kbd{font:11px/1 ui-monospace,Consolas,monospace;color:var(--sub);border:1px solid var(--line);
-    border-radius:5px;padding:3px 5px;margin-left:2px}
-  code{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;background:var(--card);
-    border:1px solid var(--line);border-radius:5px;padding:2px 6px;color:var(--fg);word-break:break-all}
-  .out{margin:14px 2px 0;text-align:center;color:var(--sub);font-size:12px;line-height:2;word-break:break-all}
-  .out.done{color:var(--sub)}
-  .out.done code{color:var(--fg)}
-  .foot{margin-top:30px;text-align:center;color:var(--sub);font-size:12px;line-height:2.1}
-  .foot a{color:inherit;text-underline-offset:2px;text-decoration-color:var(--line)}
-  .foot a:hover{color:var(--fg);text-decoration-color:currentColor}
-  .adv{margin-top:26px}
-  .adv summary{list-style:none;cursor:pointer;color:var(--sub);font-size:12px;text-align:center}
+  button{flex:none;display:inline-flex;align-items:center;justify-content:center;gap:6px;font:inherit;
+    font-size:13.5px;font-weight:500;cursor:pointer;border-radius:12px;padding:11px 16px;
+    border:1px solid transparent;white-space:nowrap;
+    transition:transform .16s,box-shadow .18s,border-color .18s,background-color .18s,opacity .16s}
+  .solid{background:linear-gradient(180deg,var(--solid-a),var(--solid-b));color:var(--solid-fg);
+    box-shadow:0 1px 2px rgba(16,24,40,.16),0 6px 14px -6px rgba(16,24,40,.36)}
+  .solid:hover{transform:translateY(-1px);box-shadow:0 2px 4px rgba(16,24,40,.18),0 10px 20px -8px rgba(16,24,40,.42)}
+  .solid:active{transform:translateY(0);box-shadow:0 1px 2px rgba(16,24,40,.2)}
+  .ghost{background:transparent;color:var(--fg);border-color:var(--line)}
+  .ghost:hover{border-color:var(--sub);background:var(--soft)}
+  .ghost:active{transform:translateY(1px)}
+  kbd{font:11px/1 ui-monospace,Consolas,monospace;color:var(--sub);background:var(--soft);
+    border:1px solid var(--line);border-radius:6px;padding:3px 5px;margin-left:1px}
+  .ghost:hover kbd{color:var(--fg)}
+
+  .result{margin:16px 2px 0;padding:13px 16px;border-radius:15px;border:1px dashed var(--line);
+    background:var(--soft);transition:border-color .22s,background-color .22s,box-shadow .22s}
+  .result.done{border-style:solid;border-color:var(--line);background:var(--card);box-shadow:var(--shadow)}
+  .out-label{display:block;color:var(--sub);font-size:11px;font-weight:600;letter-spacing:.07em;
+    margin-bottom:7px;transition:color .22s}
+  .result.done .out-label{color:var(--accent)}
+  .result code{display:block;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px;
+    line-height:1.75;color:var(--sub);word-break:break-all}
+  .result.done code{color:var(--fg)}
+
+  .chips{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:22px}
+  .chip{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:var(--sub);
+    padding:5px 11px;border-radius:999px;border:1px solid var(--line);background:var(--card)}
+  .chip::before{content:"";width:5px;height:5px;border-radius:50%;
+    background:linear-gradient(140deg,var(--accent),var(--accent-2));flex:none}
+
+  .adv{margin-top:30px}
+  .adv summary{list-style:none;cursor:pointer;color:var(--sub);font-size:12px;text-align:center;
+    width:max-content;margin:0 auto;padding:6px 14px;border-radius:999px;border:1px solid transparent;
+    transition:color .18s,border-color .18s,background-color .18s}
+  .adv summary:hover{color:var(--fg);border-color:var(--line);background:var(--card)}
   .adv summary::-webkit-details-marker{display:none}
-  .adv[open] summary{margin-bottom:12px}
-  .adv .bar{padding:4px 10px 4px 14px;box-shadow:none;border:1px solid var(--line);margin-bottom:8px}
-  .adv .bar input{font-size:13px;padding:9px 2px}
-  .toast{position:fixed;left:50%;bottom:36px;transform:translate(-50%,20px);opacity:0;
-    background:var(--solid);color:var(--solid-fg);font-size:13px;padding:9px 16px;border-radius:10px;
-    transition:.25s;pointer-events:none}
-  .toast.on{opacity:1;transform:translate(-50%,0)}
+  .adv[open] summary{margin-bottom:14px}
+  .adv .bar{padding:2px 10px 2px 14px;box-shadow:none;border:1px solid var(--line);margin-bottom:9px;
+    border-radius:13px;background:var(--card)}
+  .adv .bar:focus-within{border-color:transparent;box-shadow:var(--ring)}
+  .adv .bar input{font-size:13px;padding:10px 2px}
+
+  .foot{margin-top:38px;text-align:center;color:var(--sub);font-size:11.5px;line-height:2.1}
+  .foot a{color:var(--sub);text-underline-offset:3px;text-decoration-color:var(--line);
+    text-decoration-style:dotted;transition:color .18s,text-decoration-color .18s}
+  .foot a:hover{color:var(--fg);text-decoration-color:currentColor}
+  .foot code{font-family:ui-monospace,Consolas,monospace;font-size:11px;background:var(--card);
+    border:1px solid var(--line);border-radius:6px;padding:2px 6px;color:var(--sub);word-break:break-all}
+
+  .toast{position:fixed;left:50%;bottom:38px;transform:translate(-50%,18px) scale(.97);opacity:0;
+    background:linear-gradient(180deg,var(--solid-a),var(--solid-b));color:var(--solid-fg);
+    font-size:13px;padding:10px 18px;border-radius:12px;
+    box-shadow:0 14px 30px -10px rgba(16,24,40,.45);
+    transition:opacity .24s,transform .28s cubic-bezier(.22,.86,.28,1);pointer-events:none}
+  .toast.on{opacity:1;transform:translate(-50%,0) scale(1)}
+
   @media (max-width:560px){
-    main{padding:64px 16px 56px}
-    h1{font-size:36px}
-    .sub{margin-bottom:40px}
+    main{padding:66px 16px 60px}
+    .mark{width:50px;height:50px;border-radius:15px;margin-bottom:22px}
+    h1{font-size:35px}
+    .sub{margin-bottom:38px;font-size:14px}
+    .bar{flex-wrap:wrap;padding:12px}
+    /* 输入框独占首行（图标 34 + 间距 11），按钮落到第二行平分：
+       basis 给足 → 首行只剩 15px，按钮必然换行；即使取整差 1px，
+       输入框也会收缩而不是把图标挤下去 */
+    .bar input{flex:1 1 calc(100% - 60px)}
+    .bar button{flex:1 1 auto;min-width:0}
+    .result{padding:12px 14px}
   }
 </style>
 </head>
 <body>
 <main>
+  <div class="mark" aria-hidden="true">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M20 8H5"></path><path d="m8.5 4.6 -3.4 3.4 3.4 3.4"></path>
+      <path d="M4 16h15"></path><path d="m15.5 12.6 3.4 3.4 -3.4 3.4"></path>
+    </svg>
+  </div>
+
   <h1>CF Relay</h1>
   <p class="sub">把下载直链拼在本站域名后面，交给 Cloudflare 边缘节点中转，换一条更稳定的链接。支持 Range 断点续传，可直接打开或复制分享。</p>
 
   <div class="bar" id="bar">
     <span class="ico">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M4 21h16"></path>
       </svg>
@@ -882,7 +967,17 @@ function homePage() {
     <button class="ghost" id="copy">复制 <kbd id="kc">Ctrl C</kbd></button>
   </div>
 
-  <p class="out" id="out"><span id="glabel">示例：</span><code id="eg"></code></p>
+  <div class="result" id="out">
+    <span class="out-label" id="glabel">示例：</span>
+    <code id="eg"></code>
+  </div>
+
+  <div class="chips">
+    <span class="chip">Range 断点续传</span>
+    <span class="chip">自动跟随 302</span>
+    <span class="chip">SSRF 防护</span>
+    <span class="chip">JSON API</span>
+  </div>
 
   <details class="adv">
     <summary>高级选项</summary>
@@ -894,7 +989,7 @@ function homePage() {
     <span id="api" hidden>程序化调用：<a id="apilink" href="/api">JSON API</a>
       <code>/api/link</code> <code>/api/info</code> <code>/api/check</code><br></span>
     <span id="note" hidden>当前是本地预览，域名是占位符；部署到 Cloudflare 后会自动换成你自己的 Worker 域名<br></span>
-    <span id="ready" hidden>框内始终保留原始直链 · 中转链接实时生成在上方 · 打开与复制都用中转链接</span>
+    <span id="ready" hidden>框内始终保留原始直链 · 中转链接实时生成在下方 · 打开与复制都用中转链接</span>
   </p>
 </main>
 <div class="toast" id="toast">已复制</div>

@@ -270,7 +270,7 @@ function stubUpstream(map) {
   const html = await home.text();
   check('首页仍是 HTML 且带 API 入口', home.status === 200 && html.includes('<h1>CF Relay</h1>') && html.includes('/api'));
   check('首页输入框不回填中转链接：只保留原始地址的输出行',
-    html.includes('id="out"') && html.includes('<span id="glabel">') && html.includes('needsQueryForm'));
+    html.includes('id="out"') && html.includes('id="glabel"') && html.includes('needsQueryForm'));
   check('首页默认产出路径拼接形态', html.includes("RELAY + '/' + raw"));
   check('内联模板未被转义破坏（location.origin).replace(/\\/+$/, \'\') 仍在）', (() => {
     const k = 'location.origin).replace(/';
