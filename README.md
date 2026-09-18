@@ -68,6 +68,9 @@ npm run deploy              # 部署，结束后会输出 https://cf-relay.<子�
 Dashboard → Settings → Variables and Secrets 存为 **Secret**，或本地执行 `npx wrangler secret put TOKEN`。
 新增/修改 Secret 后需要在 Dashboard 里手动触发一次 Re-deploy。
 
+**关于 API token**：Workers Builds 会自动为你生成一个部署用的 API token，不需要手动配置。
+构建日志在 Worker 的 Deployments 页面可查。
+
 ## 二、中转后的链接长什么样
 
 | 形态 | 示例 | 说明 |
