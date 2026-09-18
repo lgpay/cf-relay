@@ -56,13 +56,32 @@ npm run deploy              # 部署，结束后会输出 https://cf-relay.<子�
 |---|---|
 | 项目名称 | `cf-relay` |
 | 生产分支 / Production branch | `main` |
-| 根目录 / Root directory | `worker` |
-| 构建命令 / Build command | `npm install` |
+| 根目录 / Root directory | **`worker`**，或**留空**（仓库根也放了一份等效的 `wrangler.toml`） |
+| 构建命令 / Build command | `npm install`（或留空） |
 | 部署命令 / Deploy command | `npx wrangler deploy` |
+
+> ⚠️ **Root directory 千万别指向 `preview/` 或其它不含 `wrangler.toml` 的目录。**
+> 那样 Workers Builds 找不到配置会退回「自动配置」，把仓库当**静态站点**发布：
+> 症状是访客无论带什么参数都只看到首页 HTML（静态站点不认 `?url=`），
+> 未命中路径返回**空的 404** 而不是 `400` JSON。用下面的自检命令一眼可辨。
 
 新版界面把构建与部署拆成两条命令，旧界面只有一个构建命令框 —— 那种情况填 `npx wrangler deploy` 即可。
 
 4. 保存并部署。之后每次 push 到 `main` 自动发布；推分支或开 PR 会生成独立的 Preview 版本，不影响生产。
+
+### 部署自检（两条命令，10 秒）
+
+```bash
+W=https://<你的域名>
+
+# ① 必须返回 400 + JSON 错误体。若返回「空的 404」→ 部署成了静态站点，去改 Root directory
+curl -s "$W/this-path-does-not-exist"
+
+# ② 必须返回 JSON 探测信息（文件名 / 大小 / 是否支持 Range）
+curl -s "$W/?url=https%3A%2F%2Fexample.com&mode=info"
+```
+
+正常工作的 Worker，任何响应都会带 `x-relay-target`（中转时）或 `access-control-allow-origin: *`（所有响应）与 `cache-control: no-store`；静态站点不会有这些头。
 
 **环境变量**：`wrangler.toml` 的 `[vars]` 会随代码一起部署；不想进仓库的（如 `TOKEN`）放到
 Dashboard → Settings → Variables and Secrets 存为 **Secret**，或本地执行 `npx wrangler secret put TOKEN`。

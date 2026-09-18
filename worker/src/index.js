@@ -37,9 +37,15 @@ export default {
 
     // 无参数访问根路径 → 返回生成中转链接的小页面
     if (request.method === 'GET' && url.pathname === '/' && !hasTargetParam(url)) {
-      return new Response(homePage(url.origin), {
+      return new Response(homePage(), {
         status: 200,
-        headers: { 'content-type': 'text/html; charset=utf-8', ...corsHeaders() },
+        headers: {
+          'content-type': 'text/html; charset=utf-8',
+          // 必须显式 no-store：否则首页可能被边缘/浏览器缓存，
+          // 在 cache key 忽略 query string 时，带 ?url= 的请求会拿到缓存的首页 HTML
+          'cache-control': 'no-store, max-age=0',
+          ...corsHeaders(),
+        },
       });
     }
 
@@ -93,7 +99,11 @@ function corsHeaders() {
 function jsonError(status, message) {
   return new Response(JSON.stringify({ error: true, status, message }, null, 2), {
     status,
-    headers: { 'content-type': 'application/json; charset=utf-8', ...corsHeaders() },
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store, max-age=0',
+      ...corsHeaders(),
+    },
   });
 }
 
@@ -204,7 +214,11 @@ async function probe(target, env, reqUrl) {
   };
   return new Response(JSON.stringify(info, null, 2), {
     status: 200,
-    headers: { 'content-type': 'application/json; charset=utf-8', ...corsHeaders() },
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store, max-age=0',
+      ...corsHeaders(),
+    },
   });
 }
 
