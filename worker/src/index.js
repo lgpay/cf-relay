@@ -850,7 +850,11 @@ function homePage() {
     background:linear-gradient(140deg,#5b83ff,#8f6cff);color:#fff;
     display:flex;align-items:center;justify-content:center;
     box-shadow:0 10px 22px -8px rgba(79,124,255,.55),0 2px 6px rgba(16,24,40,.10)}
-  h1{margin:0 0 18px;font-size:46px;line-height:1.1;font-weight:700;letter-spacing:-.03em;text-align:center;
+  /* padding-bottom 用来撑开「背景绘制区」：background-clip:text 只在 padding box 内取色，
+     而 line-height:1.1 的盒高(50.6px)小于字体行高(ascent 50 + descent 12)，y 的降部落在盒外
+     → 那几像素没有颜色可裁，直接透明（Segoe UI 实测被裁 4.7px）。预留 .15em，
+     同时把 margin 减掉等量，保证与副标题的间距不变 */
+  h1{margin:0 0 11px;padding-bottom:.15em;font-size:46px;line-height:1.1;font-weight:700;letter-spacing:-.03em;text-align:center;
     background:linear-gradient(180deg,var(--fg),var(--fg-2));
     -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:var(--fg)}
   .sub{margin:0 auto 44px;max-width:498px;text-align:center;color:var(--sub);font-size:14.5px;line-height:1.88}
