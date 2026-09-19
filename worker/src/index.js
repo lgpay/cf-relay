@@ -885,15 +885,13 @@ function homePage() {
     border:1px solid var(--line);border-radius:6px;padding:3px 5px;margin-left:1px}
   .ghost:hover kbd{color:var(--fg)}
 
-  .result{margin:16px 2px 0;padding:13px 16px;border-radius:15px;border:1px dashed var(--line);
-    background:var(--soft);transition:border-color .22s,background-color .22s,box-shadow .22s}
-  .result.done{border-style:solid;border-color:var(--line);background:var(--card);box-shadow:var(--shadow)}
-  .out-label{display:block;color:var(--sub);font-size:11px;font-weight:600;letter-spacing:.07em;
-    margin-bottom:7px;transition:color .22s}
-  .result.done .out-label{color:var(--accent)}
+  .result{margin:16px 2px 0;padding:13px 16px;border-radius:15px;border:1px solid var(--line);
+    background:var(--card);box-shadow:var(--shadow)}
+  .result[hidden]{display:none}
+  .out-label{display:block;color:var(--accent);font-size:11px;font-weight:600;letter-spacing:.07em;
+    margin-bottom:7px}
   .result code{display:block;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px;
-    line-height:1.75;color:var(--sub);word-break:break-all}
-  .result.done code{color:var(--fg)}
+    line-height:1.75;color:var(--fg);word-break:break-all}
 
   .chips{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:22px}
   .chip{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:var(--sub);
@@ -913,12 +911,11 @@ function homePage() {
   .adv .bar:focus-within{border-color:transparent;box-shadow:var(--ring)}
   .adv .bar input{font-size:13px;padding:10px 2px}
 
-  .foot{margin-top:38px;text-align:center;color:var(--sub);font-size:11.5px;line-height:2.1}
-  .foot a{color:var(--sub);text-underline-offset:3px;text-decoration-color:var(--line);
-    text-decoration-style:dotted;transition:color .18s,text-decoration-color .18s}
-  .foot a:hover{color:var(--fg);text-decoration-color:currentColor}
-  .foot code{font-family:ui-monospace,Consolas,monospace;font-size:11px;background:var(--card);
-    border:1px solid var(--line);border-radius:6px;padding:2px 6px;color:var(--sub);word-break:break-all}
+  .foot{margin-top:34px;text-align:center;color:var(--sub);font-size:11.5px}
+  .foot a{display:inline-flex;align-items:center;gap:6px;color:var(--sub);text-decoration:none;
+    transition:color .18s}
+  .foot a:hover{color:var(--fg)}
+  .foot .sep{margin:0 10px;opacity:.45}
 
   .toast{position:fixed;left:50%;bottom:38px;transform:translate(-50%,18px) scale(.97);opacity:0;
     background:linear-gradient(180deg,var(--solid-a),var(--solid-b));color:var(--solid-fg);
@@ -962,13 +959,13 @@ function homePage() {
         <path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M4 21h16"></path>
       </svg>
     </span>
-    <input id="src" placeholder="粘贴下载直链，框内保持原样…" autocomplete="off" spellcheck="false" autofocus>
+    <input id="src" placeholder="粘贴下载直链，中转链接生成在下方…" autocomplete="off" spellcheck="false" autofocus>
     <button class="solid" id="open">打开 ↗</button>
     <button class="ghost" id="copy">复制 <kbd id="kc">Ctrl C</kbd></button>
   </div>
 
-  <div class="result" id="out">
-    <span class="out-label" id="glabel">示例：</span>
+  <div class="result" id="out" hidden>
+    <span class="out-label" id="glabel">中转链接：</span>
     <code id="eg"></code>
   </div>
 
@@ -986,10 +983,13 @@ function homePage() {
   </details>
 
   <p class="foot">
-    <span id="api" hidden>程序化调用：<a id="apilink" href="/api">JSON API</a>
-      <code>/api/link</code> <code>/api/info</code> <code>/api/check</code><br></span>
-    <span id="note" hidden>当前是本地预览，域名是占位符；部署到 Cloudflare 后会自动换成你自己的 Worker 域名<br></span>
-    <span id="ready" hidden>框内始终保留原始直链 · 中转链接实时生成在下方 · 打开与复制都用中转链接</span>
+    <a id="ghlink" href="https://github.com/lgpay/cf-relay" target="_blank" rel="noopener" title="GitHub 项目地址">
+      <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+    <span class="sep">·</span>
+    <a id="apilink" href="/api">JSON API</a>
+    <span id="localnote" hidden><span class="sep">·</span>本地预览模式</span>
   </p>
 </main>
 <div class="toast" id="toast">已复制</div>
@@ -1000,7 +1000,7 @@ function homePage() {
   var RELAY = (IS_FILE ? 'https://cf-relay.demo.workers.dev' : location.origin).replace(/\/+$/, '');
   // Worker 自己占用的参数名：路径拼接形态下它们会被剥掉，不能透传给源站
   var RESERVED = ['url', 'u', 'q', 'token', 'name', 'mode'];
-  var EXAMPLE = RELAY + '/https://example.com/file.zip';
+  var LABEL = '\u4e2d\u8f6c\u94fe\u63a5\uff1a';
 
   var $ = function(id){ return document.getElementById(id); };
   var src = $('src'), nameI = $('name'), tokenI = $('token');
@@ -1008,11 +1008,9 @@ function homePage() {
   var tmr = null, debounce = null, outCache = '';
 
   $('kc').textContent = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent) ? '\u2318C' : 'Ctrl C';
-  $('note').hidden = !IS_FILE;
-  $('ready').hidden = IS_FILE;
-  $('api').hidden = IS_FILE;
+  $('localnote').hidden = !IS_FILE;
   $('apilink').setAttribute('href', RELAY + '/api');
-  showExample();
+  clearOut();
 
   function toast(msg){
     toastEl.textContent = msg;
@@ -1090,17 +1088,18 @@ function homePage() {
     return { url: RELAY + '/' + raw + tail, form: 'path' };
   }
 
-  function showExample(){
-    outEl.classList.remove('done');
-    $('glabel').textContent = '示例：';
-    $('eg').textContent = EXAMPLE;
+  // 无输入时不显示任何结果行（不再展示示例链接）
+  function clearOut(){
+    outEl.hidden = true;
+    $('glabel').textContent = LABEL;
+    $('eg').textContent = '';
   }
 
   function setOut(r){
-    outEl.classList.add('done');
+    outEl.hidden = false;
     $('glabel').textContent = r.form === 'query'
       ? '\u4e2d\u8f6c\u94fe\u63a5\uff08\u76ee\u6807\u5e26\u4fdd\u7559\u53c2\u6570\uff0c\u5df2\u56de\u9000 ?url= \u5f62\u6001\uff09\uff1a'
-      : '\u4e2d\u8f6c\u94fe\u63a5\uff1a';
+      : LABEL;
     $('eg').textContent = r.url;
   }
 
@@ -1110,7 +1109,7 @@ function homePage() {
     if (!v){
       outCache = '';
       src.removeAttribute('title');
-      showExample();
+      clearOut();
       return '';
     }
 

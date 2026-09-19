@@ -72,8 +72,9 @@ const m = html.match(/<script>([\s\S]*?)<\/script>/);
 check('页面里能抽到 <script>', Boolean(m));
 
 const srcTag = html.slice(html.indexOf('id="src"'), html.indexOf('id="src"') + 400);
-check('输入框说明改为"框内保持原样"', srcTag.includes('框内保持原样'), srcTag.slice(0, 160));
+check('输入框文案说明中转链接生成在下方', srcTag.includes('中转链接生成在下方'), srcTag.slice(0, 160));
 check('脚本里已无"就地把框内换成中转链接"的写法', !m[1].includes('src.value = out'));
+check('页面已移除示例链接', !html.includes('example.com/file.zip') && !m[1].includes('EXAMPLE'));
 
 new Function('document', 'location', 'navigator', 'window', 'setTimeout', 'clearTimeout', m[1])(
   document, location, navigator, window, setTimeout, clearTimeout,
@@ -90,7 +91,8 @@ const type = async (v) => { input.value = v; input.fire('input'); await wait(300
 
 /* --------------------------------- 用例 --------------------------------- */
 
-check('初始状态显示示例', label().includes('示例') && out() === `${ORIGIN}/https://example.com/file.zip`, out());
+check('初始状态不显示结果行（无示例）',
+  $('out').hidden === true && out() === '' && label() === '中转链接：', `${$('out').hidden} / ${out()}`);
 
 // 1. 核心诉求：输入框内容不变，中转链接是"域名后面直接接原始直链"
 input.value = 'https://get.com/get.zip';
@@ -150,11 +152,12 @@ await type('get.com/get.zip');
 check('自动补协议头后仍是路径拼接形态', out() === `${ORIGIN}/https://get.com/get.zip`, out());
 check('框内同步为补全后的原始地址', input.value === 'https://get.com/get.zip', input.value);
 
-// 7. 清空 → 回到示例
+// 7. 清空 → 结果行重新隐藏
 input.value = '';
 input.fire('input');
 await wait(300);
-check('清空后回落到示例', label().includes('示例') && out() === `${ORIGIN}/https://example.com/file.zip`, out());
+check('清空后结果行隐藏且内容清空',
+  $('out').hidden === true && out() === '', `${$('out').hidden} / ${out()}`);
 check('清空后「打开」会提示先粘贴', (() => { opened = ''; $('open').fire('click'); return opened === ''; })());
 
 // 8. Ctrl+Enter 打开

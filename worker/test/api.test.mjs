@@ -272,6 +272,10 @@ function stubUpstream(map) {
   check('首页输入框不回填中转链接：只保留原始地址的输出行',
     html.includes('id="out"') && html.includes('id="glabel"') && html.includes('needsQueryForm'));
   check('首页默认产出路径拼接形态', html.includes("RELAY + '/' + raw"));
+  check('页脚含 GitHub 项目链接且已简化',
+    html.includes('id="ghlink"') && html.includes('https://github.com/lgpay/cf-relay')
+    && !html.includes('程序化调用') && !html.includes('id="ready"'));
+  check('首页无示例链接残留', !html.includes('example.com/file.zip') && !html.includes('示例：'));
   check('内联模板未被转义破坏（location.origin).replace(/\\/+$/, \'\') 仍在）', (() => {
     const k = 'location.origin).replace(/';
     const i = html.indexOf(k) + k.length;

@@ -127,6 +127,7 @@ Dashboard → Settings → Variables and Secrets 存为 **Secret**，或本地�
 转换是自动的（输入/粘贴后 220ms，回车立即）；粘贴进来的如果已经是中转链接，会自动还原成原始地址。
 粘贴的地址若没带 `http(s)://` 会自动补上（路径拼接形态必须有协议头，否则 Worker 认不出目标）。
 底部「高级选项」可填保存文件名与访问令牌，改动后立即重算。`Ctrl+Enter` 直接打开。
+未输入时页面不显示任何示例链接；页脚只有 GitHub 项目地址与 JSON API 两个入口。
 
 ## 三、JSON API
 
