@@ -853,7 +853,7 @@ function homePage() {
   h1{margin:0 0 18px;font-size:46px;line-height:1.1;font-weight:700;letter-spacing:-.03em;text-align:center;
     background:linear-gradient(180deg,var(--fg),var(--fg-2));
     -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:var(--fg)}
-  .sub{margin:0 auto 52px;max-width:498px;text-align:center;color:var(--sub);font-size:14.5px;line-height:1.88}
+  .sub{margin:0 auto 44px;max-width:498px;text-align:center;color:var(--sub);font-size:14.5px;line-height:1.88}
 
   .bar{display:flex;align-items:center;gap:11px;background:var(--card);border-radius:18px;
     padding:11px 11px 11px 16px;border:1px solid var(--line2);box-shadow:var(--shadow);
@@ -950,7 +950,7 @@ function homePage() {
   </div>
 
   <h1>CF Relay</h1>
-  <p class="sub">把下载直链拼在本站域名后面，交给 Cloudflare 边缘节点中转，换一条更稳定的链接。支持 Range 断点续传，可直接打开或复制分享。</p>
+  <p class="sub">把下载直链拼在本站域名后，经 Cloudflare 边缘中转，链接更稳定。</p>
 
   <div class="bar" id="bar">
     <span class="ico">
@@ -970,16 +970,16 @@ function homePage() {
   </div>
 
   <div class="chips">
-    <span class="chip">Range 断点续传</span>
-    <span class="chip">自动跟随 302</span>
+    <span class="chip">断点续传</span>
+    <span class="chip">自动跳转</span>
     <span class="chip">SSRF 防护</span>
     <span class="chip">JSON API</span>
   </div>
 
   <details class="adv">
     <summary>高级选项</summary>
-    <div class="bar"><input id="name" placeholder="指定保存的文件名，如 setup.exe（留空则按源站推断）" autocomplete="off"></div>
-    <div class="bar"><input id="token" placeholder="访问令牌，仅当 Worker 配置了 TOKEN 时才需要" autocomplete="off"></div>
+    <div class="bar"><input id="name" placeholder="文件名，如 setup.exe（留空按源站推断）" autocomplete="off"></div>
+    <div class="bar"><input id="token" placeholder="访问令牌，仅配置了 TOKEN 时需要" autocomplete="off"></div>
   </details>
 
   <p class="foot">
@@ -1098,7 +1098,7 @@ function homePage() {
   function setOut(r){
     outEl.hidden = false;
     $('glabel').textContent = r.form === 'query'
-      ? '\u4e2d\u8f6c\u94fe\u63a5\uff08\u76ee\u6807\u5e26\u4fdd\u7559\u53c2\u6570\uff0c\u5df2\u56de\u9000 ?url= \u5f62\u6001\uff09\uff1a'
+      ? '\u4e2d\u8f6c\u94fe\u63a5\uff08\u5df2\u56de\u9000 ?url= \u5f62\u6001\uff09\uff1a'
       : LABEL;
     $('eg').textContent = r.url;
   }
@@ -1173,19 +1173,19 @@ function homePage() {
 
   $('open').addEventListener('click', function(){
     var v = finalUrl();
-    if (!v){ toast('请先粘贴下载直链'); src.focus(); return; }
+    if (!v){ toast('请先粘贴直链'); src.focus(); return; }
     window.open(v, '_blank', 'noopener');
   });
 
   $('copy').addEventListener('click', function(){
     var v = finalUrl();
-    if (!v){ toast('请先粘贴下载直链'); src.focus(); return; }
+    if (!v){ toast('请先粘贴直链'); src.focus(); return; }
     copyText(v).then(function(){
-      toast('中转链接已复制');
+      toast('已复制');
       var btn = $('copy'), old = btn.innerHTML;
       btn.textContent = '已复制';
       setTimeout(function(){ btn.innerHTML = old; }, 1200);
-    }).catch(function(){ toast('复制失败，请手动选中后复制'); });
+    }).catch(function(){ toast('复制失败，请手动复制'); });
   });
 
   document.addEventListener('keydown', function(e){
