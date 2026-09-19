@@ -128,8 +128,12 @@
   .adv .bar:focus-within{border-color:transparent;box-shadow:var(--ring)}
   .adv .bar input{font-size:13px;padding:10px 2px}
 
-  /* margin:auto 0 0 —— 上边距吃掉剩余空间把页脚压到底；padding-top 保证与上方内容至少留 34px */
-  .foot{margin:auto 0 0;padding-top:34px;text-align:center;color:var(--sub);font-size:11.5px}
+  /* margin:auto 0 0 —— 上边距吃掉剩余空间把页脚压到底；padding-top 保证与上方内容至少留 34px。
+     必须让页脚本身成为 flex 行：三个子元素一个是「图标+文字」的 inline-flex，它的第一个
+     flex 项是 SVG（替换元素、无基线），浏览器只能拿 SVG 底边当整个链接的基线，再和邻居的
+     文字基线对齐 → "GitHub" 会被顶高 3.7px。改成按盒子中心对齐就一致了 */
+  .foot{margin:auto 0 0;padding-top:34px;color:var(--sub);font-size:11.5px;
+    display:flex;align-items:center;justify-content:center}
   .foot a{display:inline-flex;align-items:center;gap:6px;color:var(--sub);text-decoration:none;
     transition:color .18s}
   .foot a:hover{color:var(--fg)}
